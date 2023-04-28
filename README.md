@@ -1,26 +1,38 @@
 # Gelbooru Favorite Downloader
 
-This script allows you to download your favorite posts from [Gelbooru](https://gelbooru.com/) using their [API](https://gelbooru.com/index.php?page=wiki&s=view&id=18780). The script logs in to your Gelbooru account and then retrieves your favorite posts. For each post, it downloads the associated image and saves it to a directory named after the character tags and sensitivity rating of the post. The script also creates directories for posts with multiple characters and posts with no character tags.
+This Python script downloads your favorite images from Gelbooru to your local machine. It logs into your Gelbooru account, fetches your favorite posts, and downloads the images. Each image is saved in a folder named after the character(s) associated with that image and the sensitivity level defined on Gelbooru.
 
-## Installation
+## Prerequisites
 
-1. Clone this repository: `git clone https://github.com/Wffv9FNa/Gelbooru-Favorite-Downloader/`
-2. Install the required packages: `pip install -r requirements.txt`
+You need the following Python packages to run this script:
+* requests
+* beautifulsoup4
+
+You can install these packages using pip:
+```sh
+pip install requests beautifulsoup4
+```
 
 ## Usage
 
-1. Set your Gelbooru credentials in the `USERNAME` and `PASSWORD` variables in `gelbooru_favorite_downloader.py`.
-2. Run the script: `python gelbooru_favorite_downloader.py`
+1. Download the script and save it to your local machine.
+2. Open the script in a text editor.
+3. Replace the following placeholders with your own information:
+   * `API_KEY`: Your Gelbooru API key. You can find your API key in your Gelbooru account settings.
+   * `USER_ID`: Your Gelbooru user ID. You can find your user ID in your Gelbooru account settings.
+   * `USERNAME`: Your Gelbooru username.
+   * `PASSWORD`: Your Gelbooru password.
+4. Save the changes to the script.
+5. Open a command prompt or terminal window and navigate to the directory where you saved the script.
+6. Run the script using the following command:
+   ```sh
+   python gelbooru_favorite_downloader.py
+   ```
+7. The script will log in to your Gelbooru account, fetch your favorite posts, and download the images. The images will be saved in folders named after the character(s) associated with each image and the sensitivity level defined on Gelbooru.
 
-## Configuration
+## Customization
 
-The following variables can be adjusted in the script to customize its behavior:
+You can customize the script by changing the following variables:
 
-- `API_KEY`: The API key to use for accessing Gelbooru's API.
-- `USER_ID`: The ID of the Gelbooru user whose favorite posts to download.
-- `POSTS_PER_PAGE`: The number of favorite posts to retrieve per page.
-- `MAX_PAGES`: The maximum number of pages of favorite posts to retrieve.
-
-## Disclaimer
-
-Please use this script responsibly and in accordance with Gelbooru's terms of service. The author of this script is not responsible for any misuse or violation of Gelbooru's policies.
+* `POSTS_PER_PAGE`: The number of favorite posts to fetch per page. The default value is 50.
+* `MAX_PAGES`: The maximum number of pages of favorite posts to fetch. The default value is 5.
