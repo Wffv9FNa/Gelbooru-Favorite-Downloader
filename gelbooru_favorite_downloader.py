@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import time
+import json
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,6 +13,7 @@ USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
 tag_cache = {}
+CACHE_FILE = "tag_cache.json"
 
 def login():
     session = requests.Session()
@@ -44,19 +46,35 @@ def get_favorite_post_ids(session, pid):
 
 def get_post_details(post_id):
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}"
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"Error getting post details for post {post_id}: {str(e)}")
-        return None
 
-    data = json.loads(response.text)
-    if 'post' in data:
-        post = data['post']
-        return post if isinstance(post, list) else [post]
-    else:
-        return None
+    max_retries = 5
+    base_delay = 1
+
+    for i in range(max_retries):
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+
+            if response.status_code == 429:
+                raise requests.exceptions.RequestException("Too Many Requests")
+
+            data = json.loads(response.text)
+            if 'post' in data:
+                post = data['post']
+                return post if isinstance(post, list) else [post]
+            else:
+                return None
+
+        except requests.exceptions.RequestException as e:
+            if i < max_retries - 1:
+                delay = base_delay * (i + 1)
+                print(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                print(f"Error getting post details for post {post_id}: {str(e)}")
+                return None
+        else:
+            break
 
 def download_and_save_image(post, character_tags, sensitivity):
     file_url = post['file_url']
@@ -105,14 +123,30 @@ def create_directories():
     for sensitivity in sensitivities:
         os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
 
-def get_tag_details(tag):
-    if tag in tag_cache:
-        return tag_cache[tag]
+def load_cache():
+    try:
+        with open(CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
 
+def save_cache(cache):
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+def get_tag_details(tag):
+    # Load cache
+    cache = load_cache()
+
+    # Check if tag is in cache
+    if tag in cache:
+        return cache[tag]
+
+    # Fetch tag details from API
     encoded_tag = quote(tag)
     url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}"
     max_retries = 5
-    delay = 1
+    base_delay = 1
 
     for i in range(max_retries):
         try:
@@ -125,8 +159,7 @@ def get_tag_details(tag):
             data = json.loads(response.text)
             if data:
                 try:
-                    tag_cache[tag] = data['tag'][0]
-                    return tag_cache[tag]
+                    tag_details = data['tag'][0]
                 except KeyError:
                     print(f"Error: Could not find tag details for '{tag}'. Skipping this tag.")
                     return None
@@ -135,13 +168,23 @@ def get_tag_details(tag):
 
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
+                delay = base_delay * (i + 1)
                 print(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
-                delay *= 2
             else:
                 print(f"Error getting tag details for {tag}: {str(e)}")
                 return None
-                
+        else:
+            print(f"Successfully processed tag '{tag}' after {i} retries.")
+            break
+
+    # Save tag details to cache
+    if tag_details is not None:
+        cache[tag] = tag_details
+        save_cache(cache)
+
+    return tag_details
+
 def get_character_tags(tags):
     character_tags = []
 
@@ -186,13 +229,13 @@ def main():
             break
 
         print(f"Page with pid={pid}: {len(post_ids)} favorite posts")
-        
+
         with ThreadPoolExecutor() as executor:
             post_details_list = list(executor.map(get_post_details, post_ids))
 
         for post_details in post_details_list:
-            if post_details is None or not post_details:
-                print(f"Post details not found for post {post_id}")
+            if post_details is None or not post_details or post_details[0] is None:
+                print("Post details not found")
                 continue
 
             process_post(post_details[0])
@@ -201,6 +244,7 @@ def main():
             break
 
         pid += POSTS_PER_PAGE
+
 
 if __name__ == '__main__':
     main()
