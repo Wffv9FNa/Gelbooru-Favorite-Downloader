@@ -12,8 +12,8 @@ USER_ID = 'your-user-id-here'
 USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
-tag_cache = {}
 CACHE_FILE = "tag_cache.json"
+
 
 def login():
     session = requests.Session()
@@ -29,6 +29,7 @@ def login():
 
     return session
 
+
 def get_favorite_post_ids(session, pid):
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
     try:
@@ -43,6 +44,7 @@ def get_favorite_post_ids(session, pid):
     post_ids = [span.find('a')['href'].split('=')[-1] for span in post_spans]
 
     return post_ids
+
 
 def get_post_details(post_id):
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}"
@@ -73,8 +75,7 @@ def get_post_details(post_id):
             else:
                 print(f"Error getting post details for post {post_id}: {str(e)}")
                 return None
-        else:
-            break
+
 
 def download_and_save_image(post, character_tags, sensitivity):
     file_url = post['file_url']
@@ -108,6 +109,7 @@ def download_and_save_image(post, character_tags, sensitivity):
     except Exception as e:
         print(f"Error downloading image {file_name} for post {post['id']}: {str(e)}")
 
+
 def download_image(url, file_path):
     try:
         response = requests.get(url)
@@ -118,10 +120,12 @@ def download_image(url, file_path):
     with open(file_path, 'wb') as f:
         f.write(response.content)
 
+
 def create_directories():
     sensitivities = ['General', 'Sensitive', 'Questionable', 'Explicit']
     for sensitivity in sensitivities:
         os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
+
 
 def load_cache():
     try:
@@ -130,9 +134,11 @@ def load_cache():
     except FileNotFoundError:
         return {}
 
+
 def save_cache(cache):
     with open(CACHE_FILE, 'w') as f:
         json.dump(cache, f)
+
 
 def get_tag_details(tag):
     # Load cache
@@ -141,6 +147,8 @@ def get_tag_details(tag):
     # Check if tag is in cache
     if tag in cache:
         return cache[tag]
+
+    tag_details = None  # assign a default value
 
     # Fetch tag details from API
     encoded_tag = quote(tag)
@@ -185,6 +193,7 @@ def get_tag_details(tag):
 
     return tag_details
 
+
 def get_character_tags(tags):
     character_tags = []
 
@@ -194,6 +203,7 @@ def get_character_tags(tags):
             character_tags.append(tag_details['name'])
 
     return character_tags
+
 
 def get_sensitivity(post):
     rating = post.get('rating')
@@ -206,6 +216,7 @@ def get_sensitivity(post):
     else:
         return 'General'
 
+
 def process_post(post):
     post_id = post['id']
     print(f'Processing post {post_id}')
@@ -214,6 +225,7 @@ def process_post(post):
     print(f'Character tags: {character_tags}')
 
     download_and_save_image(post, character_tags, get_sensitivity(post))
+
 
 def main():
     session = login()
