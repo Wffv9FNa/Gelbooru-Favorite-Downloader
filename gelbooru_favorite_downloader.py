@@ -13,6 +13,7 @@ USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
 CACHE_FILE = "tag_cache.json"
+POSTS_CACHE_FILE = "posts_cache.json"
 
 
 def login():
@@ -217,14 +218,59 @@ def get_sensitivity(post):
         return 'General'
 
 
+def load_posts_cache():
+    try:
+        with open(POSTS_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_posts_cache(cache):
+    with open(POSTS_CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+
 def process_post(post):
     post_id = post['id']
     print(f'Processing post {post_id}')
 
+    # Load posts cache
+    posts_cache = load_posts_cache()
+
+    # Check if the post has been processed already
+    if post_id in posts_cache:
+        print(f'Skipping post {post_id} as it has already been processed')
+        return
+
     character_tags = get_character_tags(post['tags'])
     print(f'Character tags: {character_tags}')
 
-    download_and_save_image(post, character_tags, get_sensitivity(post))
+    # Check if the image file exists on disk before calling download_and_save_image
+    file_url = post['file_url']
+    file_name = file_url.split('/')[-1]
+    sensitivity = get_sensitivity(post)
+    folder_name = get_folder_name(character_tags)
+    file_path = os.path.join(folder_name, sensitivity, file_name)
+
+    if os.path.exists(file_path):
+        print(f"Skipping download of image {file_name} for post {post['id']} because it already exists")
+    else:
+        download_and_save_image(post, character_tags, sensitivity)
+
+    # Update posts cache
+    posts_cache[post_id] = True
+    save_posts_cache(posts_cache)
+
+
+# Helper function to get the folder name based on character_tags
+def get_folder_name(character_tags):
+    if not character_tags:
+        return 'No Character'
+    elif len(character_tags) == 1:
+        return character_tags[0]
+    else:
+        return 'Multiple'
 
 
 def main():
@@ -232,6 +278,9 @@ def main():
     if session is None:
         print("Failed to log in. Exiting.")
         return
+
+    # Load posts cache
+    posts_cache = load_posts_cache()
 
     pid = 0
     while True:
@@ -250,7 +299,15 @@ def main():
                 print("Post details not found")
                 continue
 
-            process_post(post_details[0])
+            post_id = post_details[0]['id']
+            if str(post_id) in posts_cache:
+                print(f"Skipping post {post_id} as it has already been processed")
+            else:
+                process_post(post_details[0])
+                # Update posts cache
+                posts_cache[str(post_id)] = True
+
+        save_posts_cache(posts_cache)
 
         if len(post_ids) < POSTS_PER_PAGE:
             break
