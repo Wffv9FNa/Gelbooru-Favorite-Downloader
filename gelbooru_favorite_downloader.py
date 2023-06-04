@@ -15,6 +15,10 @@ POSTS_PER_PAGE = 50
 CACHE_FILE = "tag_cache.json"
 POSTS_CACHE_FILE = "posts_cache.json"
 
+def log_message(message, log_file="log.txt"):
+    print(message)
+    with open(log_file, 'a') as file:
+        file.write(message + "\n")
 
 def login():
     session = requests.Session()
@@ -25,11 +29,10 @@ def login():
         response = session.post(login_url, data=login_data)
         response.raise_for_status()
     except Exception as e:
-        print(f"Error logging in: {str(e)}")
+        log_message(f"Error logging in: {str(e)}")
         return None
 
     return session
-
 
 def get_favorite_post_ids(session, pid):
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
@@ -37,7 +40,7 @@ def get_favorite_post_ids(session, pid):
         response = session.get(url)
         response.raise_for_status()
     except Exception as e:
-        print(f"Error getting favorite posts: {str(e)}")
+        log_message(f"Error getting favorite posts: {str(e)}")
         return None
 
     soup = BeautifulSoup(response.text, 'html.parser')
@@ -46,12 +49,11 @@ def get_favorite_post_ids(session, pid):
 
     return post_ids
 
-
 def get_post_details(post_id):
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}"
 
     max_retries = 5
-    base_delay = 1
+    base_delay = 2
 
     for i in range(max_retries):
         try:
@@ -71,10 +73,10 @@ def get_post_details(post_id):
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                print(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                log_message(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
             else:
-                print(f"Error getting post details for post {post_id}: {str(e)}")
+                log_message(f"Error getting post details for post {post_id}: {str(e)}")
                 return None
 
 
@@ -108,7 +110,7 @@ def download_and_save_image(post, character_tags, sensitivity):
     try:
         download_image(file_url, file_path)
     except Exception as e:
-        print(f"Error downloading image {file_name} for post {post['id']}: {str(e)}")
+        log_message(f"Error downloading image {file_name} for post {post['id']}: {str(e)}")
 
 
 def download_image(url, file_path):
@@ -155,7 +157,7 @@ def get_tag_details(tag):
     encoded_tag = quote(tag)
     url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}"
     max_retries = 5
-    base_delay = 1
+    base_delay = 2
 
     for i in range(max_retries):
         try:
@@ -170,7 +172,7 @@ def get_tag_details(tag):
                 try:
                     tag_details = data['tag'][0]
                 except KeyError:
-                    print(f"Error: Could not find tag details for '{tag}'. Skipping this tag.")
+                    log_message(f"Error: Could not find tag details for '{tag}'. Skipping this tag.")
                     return None
             else:
                 return None
@@ -178,10 +180,10 @@ def get_tag_details(tag):
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                print(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                log_message(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
             else:
-                print(f"Error getting tag details for {tag}: {str(e)}")
+                log_message(f"Error getting tag details for {tag}: {str(e)}")
                 return None
         else:
             print(f"Successfully processed tag '{tag}' after {i} retries.")
@@ -276,7 +278,7 @@ def get_folder_name(character_tags):
 def main():
     session = login()
     if session is None:
-        print("Failed to log in. Exiting.")
+        log_message("Failed to log in. Exiting.")
         return
 
     # Load posts cache
@@ -296,7 +298,7 @@ def main():
 
         for post_details in post_details_list:
             if post_details is None or not post_details or post_details[0] is None:
-                print("Post details not found")
+                log_message("Post details not found")
                 continue
 
             post_id = post_details[0]['id']
