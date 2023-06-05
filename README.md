@@ -8,6 +8,7 @@ A Python script to download your Gelbooru favorite images and organize them into
 - Organizes images into folders based on character tags and sensitivity ratings (General, Sensitive, Questionable, Explicit)
 - Handles rate limits and retries
 - Resumes downloading from the last downloaded image
+- Utilizes cache to avoid reprocessing posts and re-downloading images
 
 ## Requirements
 
@@ -41,7 +42,7 @@ Run the script in your terminal:
 python gelbooru_favorites_downloader.py
 ```
 
-The script will download your favorite images and organize them into folders based on the character tags and sensitivity ratings.
+The script will download your favorite images and organize them into folders based on the character tags and sensitivity ratings. The script first checks a local cache of processed posts, and if a post has been processed before, it won't request the post details from the API, saving on API calls.
 
 ## Contributing
 

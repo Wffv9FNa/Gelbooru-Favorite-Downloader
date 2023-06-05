@@ -4,6 +4,7 @@ from bs4 import BeautifulSoup
 import json
 import time
 import json
+import threading
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -14,11 +15,15 @@ PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
 CACHE_FILE = "tag_cache.json"
 POSTS_CACHE_FILE = "posts_cache.json"
+FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
+file_lock = threading.Lock()
+
 
 def log_message(message, log_file="log.txt"):
     print(message)
     with open(log_file, 'a') as file:
         file.write(message + "\n")
+
 
 def login():
     session = requests.Session()
@@ -33,6 +38,7 @@ def login():
         return None
 
     return session
+
 
 def get_favorite_post_ids(session, pid):
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
@@ -49,11 +55,22 @@ def get_favorite_post_ids(session, pid):
 
     return post_ids
 
+
 def get_post_details(post_id):
+    # Load posts cache
+    posts_cache = load_posts_cache()
+
+    # Check if the post is in the cache
+    if post_id in posts_cache:
+        log_message(f"Post {post_id} is already in the cache. Skipping API request.")
+        return None
+
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}"
 
     max_retries = 5
     base_delay = 2
+
+    failed_posts_cache = load_failed_posts_cache()
 
     for i in range(max_retries):
         try:
@@ -73,10 +90,14 @@ def get_post_details(post_id):
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                log_message(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                log_message(
+                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
             else:
                 log_message(f"Error getting post details for post {post_id}: {str(e)}")
+                # Save the post ID to the cache when it exceeds max retries
+                failed_posts_cache[post_id] = True
+                save_failed_posts_cache(failed_posts_cache)
                 return None
 
 
@@ -143,6 +164,29 @@ def save_cache(cache):
         json.dump(cache, f)
 
 
+# New functions for loading and saving the cache
+def load_failed_posts_cache():
+    file_lock.acquire()
+    try:
+        with open(FAILED_POSTS_CACHE_FILE, 'r') as f:
+            if os.stat(FAILED_POSTS_CACHE_FILE).st_size == 0:
+                return {}
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.decoder.JSONDecodeError:
+        with open(FAILED_POSTS_CACHE_FILE, 'r') as f:
+            print(f"Error decoding JSON, file contents: {f.read()}")
+        return {}
+    finally:
+        file_lock.release()
+
+
+def save_failed_posts_cache(cache):
+    with open(FAILED_POSTS_CACHE_FILE, 'w') as f:
+        json.dump(cache, f)
+
+
 def get_tag_details(tag):
     # Load cache
     cache = load_cache()
@@ -180,7 +224,8 @@ def get_tag_details(tag):
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                log_message(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                log_message(
+                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
             else:
                 log_message(f"Error getting tag details for {tag}: {str(e)}")
