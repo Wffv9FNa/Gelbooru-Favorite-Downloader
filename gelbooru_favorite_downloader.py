@@ -108,7 +108,7 @@ def download_and_save_image(post, character_tags, sensitivity):
     if not character_tags:
         folder_name = 'No Character'
     elif len(character_tags) == 1:
-        folder_name = character_tags[0]
+        folder_name = character_tags[0].replace(":", "-")
     else:
         folder_name = 'Multiple'
 
@@ -118,6 +118,7 @@ def download_and_save_image(post, character_tags, sensitivity):
 
     if folder_name != 'No Character' and folder_name != 'Multiple':
         for character in character_tags:
+            character = character.replace(":", "-")
             char_path = f"{character}/{sensitivity}"
             if not os.path.exists(char_path):
                 os.makedirs(char_path)
@@ -315,7 +316,7 @@ def get_folder_name(character_tags):
     if not character_tags:
         return 'No Character'
     elif len(character_tags) == 1:
-        return character_tags[0]
+        return character_tags[0].replace(":", "-")
     else:
         return 'Multiple'
 
