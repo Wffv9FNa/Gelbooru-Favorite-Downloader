@@ -5,6 +5,7 @@ import json
 import time
 import json
 import threading
+import argparse
 from urllib.parse import quote
 from concurrent.futures import ThreadPoolExecutor
 
@@ -21,9 +22,9 @@ file_lock = threading.Lock()
 
 def log_message(message, log_file="log.txt"):
     print(message)
-    with open(log_file, 'a') as file:
-        file.write(message + "\n")
-
+    if log_to_file:
+        with open(log_file, 'a') as file:
+            file.write(message + "\n")
 
 def login():
     session = requests.Session()
@@ -322,6 +323,13 @@ def get_folder_name(character_tags):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-logtofile", help="log output to file", action="store_true")
+    args = parser.parse_args()
+    
+    global log_to_file
+    log_to_file = args.logtofile
+    
     session = login()
     if session is None:
         log_message("Failed to log in. Exiting.")
