@@ -18,11 +18,13 @@ POSTS_CACHE_FILE = "posts_cache.json"
 FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 file_lock = threading.Lock()
 
+
 def log_message(message, log_file="log.txt"):
     print(message)
     if log_to_file:
         with open(log_file, 'a') as file:
             file.write(message + "\n")
+
 
 def login():
     session = requests.Session()
@@ -38,6 +40,7 @@ def login():
 
     return session
 
+
 def get_favorite_post_ids(session, pid):
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
     try:
@@ -52,6 +55,7 @@ def get_favorite_post_ids(session, pid):
     post_ids = [span.find('a')['href'].split('=')[-1] for span in post_spans]
 
     return post_ids
+
 
 def get_post_details(post_id):
     # Load posts cache
@@ -85,7 +89,8 @@ def get_post_details(post_id):
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                log_message(f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                log_message(
+                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
                 time.sleep(delay)
             else:
                 log_message(f"Error getting post details for post {post_id}: {str(e)}")
@@ -93,6 +98,7 @@ def get_post_details(post_id):
                 failed_posts_cache[post_id] = True
                 save_failed_posts_cache(failed_posts_cache)
                 return None
+
 
 def download_and_save_image(post, character_tags, sensitivity):
     file_url = post['file_url']
@@ -127,6 +133,7 @@ def download_and_save_image(post, character_tags, sensitivity):
     except Exception as e:
         log_message(f"Error downloading image {file_name} for post {post['id']}: {str(e)}")
 
+
 def download_image(url, file_path):
     try:
         response = requests.get(url)
@@ -137,10 +144,12 @@ def download_image(url, file_path):
     with open(file_path, 'wb') as f:
         f.write(response.content)
 
+
 def create_directories():
     sensitivities = ['General', 'Sensitive', 'Questionable', 'Explicit']
     for sensitivity in sensitivities:
         os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
+
 
 def load_cache():
     try:
@@ -149,9 +158,11 @@ def load_cache():
     except FileNotFoundError:
         return {}
 
+
 def save_cache(cache):
     with open(CACHE_FILE, 'w') as f:
         json.dump(cache, f)
+
 
 def load_failed_posts_cache():
     file_lock.acquire()
@@ -169,9 +180,11 @@ def load_failed_posts_cache():
     finally:
         file_lock.release()
 
+
 def save_failed_posts_cache(cache):
     with open(FAILED_POSTS_CACHE_FILE, 'w') as f:
         json.dump(cache, f)
+
 
 def get_tag_details(tag):
     # Load cache
@@ -227,6 +240,7 @@ def get_tag_details(tag):
 
     return tag_details
 
+
 def get_character_tags(tags):
     character_tags = []
 
@@ -236,6 +250,7 @@ def get_character_tags(tags):
             character_tags.append(tag_details['name'])
 
     return character_tags
+
 
 def get_sensitivity(post):
     rating = post.get('rating')
@@ -248,6 +263,7 @@ def get_sensitivity(post):
     else:
         return 'General'
 
+
 def load_posts_cache():
     try:
         with open(POSTS_CACHE_FILE, 'r') as f:
@@ -255,9 +271,11 @@ def load_posts_cache():
     except FileNotFoundError:
         return {}
 
+
 def save_posts_cache(cache):
     with open(POSTS_CACHE_FILE, 'w') as f:
         json.dump(cache, f)
+
 
 def process_post(post):
     post_id = post['id']
@@ -290,6 +308,7 @@ def process_post(post):
     posts_cache[post_id] = True
     save_posts_cache(posts_cache)
 
+
 def get_folder_name(character_tags):
     if not character_tags:
         return 'No Character'
@@ -298,14 +317,15 @@ def get_folder_name(character_tags):
     else:
         return 'Multiple'
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-logtofile", help="log output to file", action="store_true")
     args = parser.parse_args()
-    
+
     global log_to_file
     log_to_file = args.logtofile
-    
+
     session = login()
     if session is None:
         log_message("Failed to log in. Exiting.")
@@ -348,6 +368,7 @@ def main():
             break
 
         pid += POSTS_PER_PAGE
+
 
 if __name__ == '__main__':
     main()
