@@ -1,12 +1,12 @@
+import argparse
+import json
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
-import json
-import time
-import threading
-import argparse
-from urllib.parse import quote
-from concurrent.futures import ThreadPoolExecutor
 
 API_KEY = 'your-api-key-here'
 USER_ID = 'your-user-id-here'
@@ -22,14 +22,14 @@ file_lock = threading.Lock()
 def log_message(message, log_file="log.txt"):
     print(message)
     if log_to_file:
-        with open(log_file, 'a') as file:
+        with open(log_file, "a") as file:
             file.write(message + "\n")
 
 
 def login():
     session = requests.Session()
-    login_url = 'https://gelbooru.com/index.php?page=account&s=login&code=00'
-    login_data = {'user': USERNAME, 'pass': PASSWORD, 'submit': 'Log in'}
+    login_url = "https://gelbooru.com/index.php?page=account&s=login&code=00"
+    login_data = {"user": USERNAME, "pass": PASSWORD, "submit": "Log in"}
 
     try:
         response = session.post(login_url, data=login_data)
@@ -50,9 +50,9 @@ def get_favorite_post_ids(session, pid):
         log_message(f"Error getting favorite posts: {str(e)}")
         return None
 
-    soup = BeautifulSoup(response.text, 'html.parser')
-    post_spans = soup.find_all('span', class_='thumb')
-    post_ids = [span.find('a')['href'].split('=')[-1] for span in post_spans]
+    soup = BeautifulSoup(response.text, "html.parser")
+    post_spans = soup.find_all("span", class_="thumb")
+    post_ids = [span.find("a")["href"].split("=")[-1] for span in post_spans]
 
     return post_ids
 
@@ -80,8 +80,8 @@ def get_post_details(post_id):
                 raise requests.exceptions.RequestException("Too Many Requests")
 
             data = json.loads(response.text)
-            if 'post' in data:
-                post = data['post']
+            if "post" in data:
+                post = data["post"]
                 return post if isinstance(post, list) else [post]
             else:
                 return None
@@ -90,7 +90,8 @@ def get_post_details(post_id):
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
                 log_message(
-                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
+                )
                 time.sleep(delay)
             else:
                 log_message(f"Error getting post details for post {post_id}: {str(e)}")
@@ -101,21 +102,21 @@ def get_post_details(post_id):
 
 
 def download_and_save_image(post, character_tags, sensitivity):
-    file_url = post['file_url']
-    file_name = file_url.split('/')[-1]
+    file_url = post["file_url"]
+    file_name = file_url.split("/")[-1]
 
     if not character_tags:
-        folder_name = 'No Character'
+        folder_name = "No Character"
     elif len(character_tags) == 1:
         folder_name = character_tags[0].replace(":", "-")
     else:
-        folder_name = 'Multiple'
+        folder_name = "Multiple"
 
     path = f"{folder_name}/{sensitivity}"
     if not os.path.exists(path):
         os.makedirs(path)
 
-    if folder_name != 'No Character' and folder_name != 'Multiple':
+    if folder_name != "No Character" and folder_name != "Multiple":
         for character in character_tags:
             character = character.replace(":", "-")
             char_path = f"{character}/{sensitivity}"
@@ -125,13 +126,17 @@ def download_and_save_image(post, character_tags, sensitivity):
     file_path = os.path.join(path, file_name)
 
     if os.path.exists(file_path):
-        print(f"Skipping download of image {file_name} for post {post['id']} because it already exists")
+        print(
+            f"Skipping download of image {file_name} for post {post['id']} because it already exists"
+        )
         return
 
     try:
         download_image(file_url, file_path)
     except Exception as e:
-        log_message(f"Error downloading image {file_name} for post {post['id']}: {str(e)}")
+        log_message(
+            f"Error downloading image {file_name} for post {post['id']}: {str(e)}"
+        )
 
 
 def download_image(url, file_path):
@@ -141,40 +146,40 @@ def download_image(url, file_path):
     except Exception as e:
         raise Exception(f"Error downloading image: {str(e)}")
 
-    with open(file_path, 'wb') as f:
+    with open(file_path, "wb") as f:
         f.write(response.content)
 
 
 def create_directories():
-    sensitivities = ['General', 'Sensitive', 'Questionable', 'Explicit']
+    sensitivities = ["General", "Sensitive", "Questionable", "Explicit"]
     for sensitivity in sensitivities:
         os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
 
 
 def load_cache():
     try:
-        with open(CACHE_FILE, 'r') as f:
+        with open(CACHE_FILE, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
 
 def save_cache(cache):
-    with open(CACHE_FILE, 'w') as f:
+    with open(CACHE_FILE, "w") as f:
         json.dump(cache, f)
 
 
 def load_failed_posts_cache():
     file_lock.acquire()
     try:
-        with open(FAILED_POSTS_CACHE_FILE, 'r') as f:
+        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
             if os.stat(FAILED_POSTS_CACHE_FILE).st_size == 0:
                 return {}
             return json.load(f)
     except FileNotFoundError:
         return {}
     except json.decoder.JSONDecodeError:
-        with open(FAILED_POSTS_CACHE_FILE, 'r') as f:
+        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
             print(f"Error decoding JSON, file contents: {f.read()}")
         return {}
     finally:
@@ -182,7 +187,7 @@ def load_failed_posts_cache():
 
 
 def save_failed_posts_cache(cache):
-    with open(FAILED_POSTS_CACHE_FILE, 'w') as f:
+    with open(FAILED_POSTS_CACHE_FILE, "w") as f:
         json.dump(cache, f)
 
 
@@ -197,7 +202,8 @@ def get_tag_details(tag):
     tag_details = None  # assign a default value
 
     # Fetch tag details from API
-    encoded_tag = quote(tag)
+    modified_tag = tag.replace("&#039;", "'")
+    encoded_tag = quote(modified_tag)
     url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}"
     max_retries = 5
     base_delay = 2
@@ -213,10 +219,12 @@ def get_tag_details(tag):
             data = json.loads(response.text)
             if data:
                 try:
-                    tag_details = data['tag'][0]
+                    tag_details = data["tag"][0]
                 except KeyError:
-                    log_message(f"Error: Could not find tag details for '{tag}'. Skipping this tag.")
-                    return None
+                    log_message(
+                        f"Error: Could not find tag details for '{tag}'. Skipping this tag."
+                    )
+                return None
             else:
                 return None
 
@@ -224,7 +232,8 @@ def get_tag_details(tag):
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
                 log_message(
-                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})")
+                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
+                )
                 time.sleep(delay)
             else:
                 log_message(f"Error getting tag details for {tag}: {str(e)}")
@@ -246,61 +255,63 @@ def get_character_tags(tags):
 
     for tag in tags.split():
         tag_details = get_tag_details(tag)
-        if tag_details and 'type' in tag_details and int(tag_details['type']) == 4:
-            character_tags.append(tag_details['name'])
+        if tag_details and "type" in tag_details and int(tag_details["type"]) == 4:
+            character_tags.append(tag_details["name"])
 
     return character_tags
 
 
 def get_sensitivity(post):
-    rating = post.get('rating')
-    if rating == 'sensitive':
-        return 'Sensitive'
-    elif rating == 'questionable':
-        return 'Questionable'
-    elif rating == 'explicit':
-        return 'Explicit'
+    rating = post.get("rating")
+    if rating == "sensitive":
+        return "Sensitive"
+    elif rating == "questionable":
+        return "Questionable"
+    elif rating == "explicit":
+        return "Explicit"
     else:
-        return 'General'
+        return "General"
 
 
 def load_posts_cache():
     try:
-        with open(POSTS_CACHE_FILE, 'r') as f:
+        with open(POSTS_CACHE_FILE, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return {}
 
 
 def save_posts_cache(cache):
-    with open(POSTS_CACHE_FILE, 'w') as f:
+    with open(POSTS_CACHE_FILE, "w") as f:
         json.dump(cache, f)
 
 
 def process_post(post):
-    post_id = post['id']
-    print(f'Processing post {post_id}')
+    post_id = post["id"]
+    print(f"Processing post {post_id}")
 
     # Load posts cache
     posts_cache = load_posts_cache()
 
     # Check if the post has been processed already
     if post_id in posts_cache:
-        print(f'Skipping post {post_id} as it has already been processed')
+        print(f"Skipping post {post_id} as it has already been processed")
         return
 
-    character_tags = get_character_tags(post['tags'])
-    print(f'Character tags: {character_tags}')
+    character_tags = get_character_tags(post["tags"])
+    print(f"Character tags: {character_tags}")
 
     # Check if the image file exists on disk before calling download_and_save_image
-    file_url = post['file_url']
-    file_name = file_url.split('/')[-1]
+    file_url = post["file_url"]
+    file_name = file_url.split("/")[-1]
     sensitivity = get_sensitivity(post)
     folder_name = get_folder_name(character_tags)
     file_path = os.path.join(folder_name, sensitivity, file_name)
 
     if os.path.exists(file_path):
-        print(f"Skipping download of image {file_name} for post {post['id']} because it already exists")
+        print(
+            f"Skipping download of image {file_name} for post {post['id']} because it already exists"
+        )
     else:
         download_and_save_image(post, character_tags, sensitivity)
 
@@ -311,11 +322,11 @@ def process_post(post):
 
 def get_folder_name(character_tags):
     if not character_tags:
-        return 'No Character'
+        return "No Character"
     elif len(character_tags) == 1:
         return character_tags[0].replace(":", "-")
     else:
-        return 'Multiple'
+        return "Multiple"
 
 
 def main():
@@ -354,7 +365,7 @@ def main():
                 log_message("Post details not found")
                 continue
 
-            post_id = post_details[0]['id']
+            post_id = post_details[0]["id"]
             if str(post_id) in posts_cache:
                 print(f"Skipping post {post_id} as it has already been processed")
                 continue
@@ -370,5 +381,5 @@ def main():
         pid += POSTS_PER_PAGE
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
