@@ -8,8 +8,8 @@ from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 
-API_KEY = 'your-api-key-here'
-USER_ID = 'your-user-id-here'
+API_KEY = "your-api-key-here"
+USER_ID = "your-user-id-here"
 USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
@@ -202,7 +202,13 @@ def get_tag_details(tag):
     tag_details = None  # assign a default value
 
     # Fetch tag details from API
-    modified_tag = tag.replace("&#039;", "'")
+    modified_tag = (
+        tag.replace("&#039;", "'")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", '"')
+        .replace("&amp;", "&")
+    )
     encoded_tag = quote(modified_tag)
     url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}"
     max_retries = 5
