@@ -8,8 +8,8 @@ from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 
-API_KEY = "your-api-key-here"
-USER_ID = "your-user-id-here"
+API_KEY = 'your-api-key-here'
+USER_ID = 'your-user-id-here'
 USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
@@ -23,7 +23,7 @@ def log_message(message, log_file="log.txt"):
     print(message)
     if log_to_file:
         with open(log_file, "a") as file:
-            file.write(message + "\n")
+            file.write(message + "\\n")
 
 
 def login():
@@ -227,25 +227,17 @@ def get_tag_details(tag):
                 try:
                     tag_details = data["tag"][0]
                 except KeyError:
-                    log_message(
-                        f"Error: Could not find tag details for '{tag}'. Skipping this tag."
-                    )
-                return None
+                    return None
             else:
                 return None
 
         except requests.exceptions.RequestException as e:
             if i < max_retries - 1:
                 delay = base_delay * (i + 1)
-                log_message(
-                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
-                )
                 time.sleep(delay)
             else:
-                log_message(f"Error getting tag details for {tag}: {str(e)}")
                 return None
         else:
-            print(f"Successfully processed tag '{tag}' after {i} retries.")
             break
 
     # Save tag details to cache
@@ -258,12 +250,10 @@ def get_tag_details(tag):
 
 def get_character_tags(tags):
     character_tags = []
-
     for tag in tags.split():
         tag_details = get_tag_details(tag)
         if tag_details and "type" in tag_details and int(tag_details["type"]) == 4:
             character_tags.append(tag_details["name"])
-
     return character_tags
 
 
