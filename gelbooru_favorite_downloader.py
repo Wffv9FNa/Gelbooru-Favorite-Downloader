@@ -8,11 +8,12 @@ from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
 
-API_KEY = 'your-api-key-here'
-USER_ID = 'your-user-id-here'
+API_KEY = "your-api-key-here"
+USER_ID = "your-user-id-here"
 USERNAME = "your-username-here"
 PASSWORD = "your-password-here"
 POSTS_PER_PAGE = 50
+MAX_CONSECUTIVE_EMPTY_PAGES = 10
 CACHE_FILE = "tag_cache.json"
 POSTS_CACHE_FILE = "posts_cache.json"
 FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
@@ -342,7 +343,11 @@ def main():
     posts_cache = load_posts_cache()
 
     pid = 0
-    while True:
+    consecutive_empty_pages = (
+        0  # Counter for consecutive pages without downloaded images
+    )
+
+    while consecutive_empty_pages < MAX_CONSECUTIVE_EMPTY_PAGES:
         post_ids = get_favorite_post_ids(session, pid)
         if post_ids is None or not post_ids:
             print(f"No more favorite posts found at pid={pid}")
@@ -352,6 +357,10 @@ def main():
 
         with ThreadPoolExecutor() as executor:
             post_details_list = list(executor.map(get_post_details, post_ids))
+
+        downloaded_images = (
+            False  # Flag to check if any images were downloaded on the current page
+        )
 
         for post_details in post_details_list:
             if post_details == "SKIP":
@@ -366,15 +375,26 @@ def main():
                 print(f"Skipping post {post_id} as it has already been processed")
                 continue
 
-            process_post(post_details[0])
-            # Update posts cache
-            posts_cache[str(post_id)] = True
-            save_posts_cache(posts_cache)
+            if process_post(post_details[0]):
+                downloaded_images = True
+                # Update posts cache
+                posts_cache[str(post_id)] = True
+                save_posts_cache(posts_cache)
+
+        if not downloaded_images:
+            consecutive_empty_pages += 1
+        else:
+            consecutive_empty_pages = 0
 
         if len(post_ids) < POSTS_PER_PAGE:
             break
 
         pid += POSTS_PER_PAGE
+
+    if consecutive_empty_pages >= MAX_CONSECUTIVE_EMPTY_PAGES:
+        print(
+            f"No images downloaded for {MAX_CONSECUTIVE_EMPTY_PAGES} consecutive pages. Ending the script."
+        )
 
 
 if __name__ == "__main__":
