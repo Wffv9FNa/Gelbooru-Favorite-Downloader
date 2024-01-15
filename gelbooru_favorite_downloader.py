@@ -20,6 +20,7 @@ FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 file_lock = threading.Lock()
 
 
+# Logging functions
 def log_message(message, log_file="log.txt"):
     print(message)
     if log_to_file:
@@ -27,6 +28,7 @@ def log_message(message, log_file="log.txt"):
             file.write(message + "\\n")
 
 
+# Login function
 def login():
     session = requests.Session()
     login_url = "https://gelbooru.com/index.php?page=account&s=login&code=00"
@@ -42,6 +44,7 @@ def login():
     return session
 
 
+# Functions related to fetching post data
 def get_favorite_post_ids(session, pid):
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
     try:
@@ -102,22 +105,34 @@ def get_post_details(post_id):
                 return None
 
 
-def download_and_save_image(post, character_tags, sensitivity):
+# Functions related to downloading and saving images
+def create_directories():
+    sensitivities = ["General", "Sensitive", "Questionable", "Explicit"]
+    for sensitivity in sensitivities:
+        os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
+
+
+def download_image(url, file_path):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+    except Exception as e:
+        raise Exception(f"Error downloading image: {str(e)}")
+
+    with open(file_path, "wb") as f:
+        f.write(response.content)
+
+
+def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
     file_url = post["file_url"]
     file_name = file_url.split("/")[-1]
 
-    if not character_tags:
-        folder_name = "No Character"
-    elif len(character_tags) == 1:
-        folder_name = character_tags[0].replace(":", "-")
-    else:
-        folder_name = "Multiple"
-
+    folder_name = get_folder_name(character_tags, copyright_tag)
     path = f"{folder_name}/{sensitivity}"
     if not os.path.exists(path):
         os.makedirs(path)
 
-    if folder_name != "No Character" and folder_name != "Multiple":
+    if folder_name != "No Character" and "Multiple" not in folder_name:
         for character in character_tags:
             character = character.replace(":", "-")
             char_path = f"{character}/{sensitivity}"
@@ -140,58 +155,7 @@ def download_and_save_image(post, character_tags, sensitivity):
         )
 
 
-def download_image(url, file_path):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-    except Exception as e:
-        raise Exception(f"Error downloading image: {str(e)}")
-
-    with open(file_path, "wb") as f:
-        f.write(response.content)
-
-
-def create_directories():
-    sensitivities = ["General", "Sensitive", "Questionable", "Explicit"]
-    for sensitivity in sensitivities:
-        os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
-
-
-def load_cache():
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-
-def save_cache(cache):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
-
-
-def load_failed_posts_cache():
-    file_lock.acquire()
-    try:
-        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
-            if os.stat(FAILED_POSTS_CACHE_FILE).st_size == 0:
-                return {}
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except json.decoder.JSONDecodeError:
-        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
-            print(f"Error decoding JSON, file contents: {f.read()}")
-        return {}
-    finally:
-        file_lock.release()
-
-
-def save_failed_posts_cache(cache):
-    with open(FAILED_POSTS_CACHE_FILE, "w") as f:
-        json.dump(cache, f)
-
-
+# Functions related to tag details
 def get_tag_details(tag):
     # Load cache
     cache = load_cache()
@@ -258,16 +222,26 @@ def get_character_tags(tags):
     return character_tags
 
 
-def get_sensitivity(post):
-    rating = post.get("rating")
-    if rating == "sensitive":
-        return "Sensitive"
-    elif rating == "questionable":
-        return "Questionable"
-    elif rating == "explicit":
-        return "Explicit"
-    else:
-        return "General"
+def get_copyright_tag(tags):
+    for tag in tags.split():
+        tag_details = get_tag_details(tag)
+        if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
+            return tag_details["name"]
+    return None
+
+
+# Functions related to cache handling
+def load_cache():
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
 
 
 def load_posts_cache():
@@ -283,6 +257,53 @@ def save_posts_cache(cache):
         json.dump(cache, f)
 
 
+def load_failed_posts_cache():
+    file_lock.acquire()
+    try:
+        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
+            if os.stat(FAILED_POSTS_CACHE_FILE).st_size == 0:
+                return {}
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.decoder.JSONDecodeError:
+        with open(FAILED_POSTS_CACHE_FILE, "r") as f:
+            print(f"Error decoding JSON, file contents: {f.read()}")
+        return {}
+    finally:
+        file_lock.release()
+
+
+def save_failed_posts_cache(cache):
+    with open(FAILED_POSTS_CACHE_FILE, "w") as f:
+        json.dump(cache, f)
+
+
+# Functions related to post processing
+def get_sensitivity(post):
+    rating = post.get("rating")
+    if rating == "sensitive":
+        return "Sensitive"
+    elif rating == "questionable":
+        return "Questionable"
+    elif rating == "explicit":
+        return "Explicit"
+    else:
+        return "General"
+
+
+def get_folder_name(character_tags, copyright_tag):
+    if not character_tags:
+        return "No Character"
+    elif len(character_tags) == 1:
+        return character_tags[0].replace(":", "-")
+    else:
+        if copyright_tag:
+            return f"Multiple/{copyright_tag.replace(':', '-')}"
+        else:
+            return "Multiple"
+
+
 def process_post(post):
     post_id = post["id"]
     print(f"Processing post {post_id}")
@@ -296,13 +317,14 @@ def process_post(post):
         return
 
     character_tags = get_character_tags(post["tags"])
+    copyright_tag = get_copyright_tag(post["tags"])
     print(f"Character tags: {character_tags}")
 
     # Check if the image file exists on disk before calling download_and_save_image
     file_url = post["file_url"]
     file_name = file_url.split("/")[-1]
     sensitivity = get_sensitivity(post)
-    folder_name = get_folder_name(character_tags)
+    folder_name = get_folder_name(character_tags, copyright_tag)
     file_path = os.path.join(folder_name, sensitivity, file_name)
 
     if os.path.exists(file_path):
@@ -310,22 +332,14 @@ def process_post(post):
             f"Skipping download of image {file_name} for post {post['id']} because it already exists"
         )
     else:
-        download_and_save_image(post, character_tags, sensitivity)
+        download_and_save_image(post, character_tags, sensitivity, copyright_tag)
 
     # Update posts cache
     posts_cache[post_id] = True
     save_posts_cache(posts_cache)
 
 
-def get_folder_name(character_tags):
-    if not character_tags:
-        return "No Character"
-    elif len(character_tags) == 1:
-        return character_tags[0].replace(":", "-")
-    else:
-        return "Multiple"
-
-
+# Main function
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-logtofile", help="log output to file", action="store_true")
