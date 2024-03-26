@@ -123,18 +123,32 @@ def download_image(url, file_path):
         f.write(response.content)
 
 
+def sanitize_for_path(name):
+    """
+    Sanitizes a string so it can be used as a valid file name or directory name in Windows.
+    Replaces invalid characters with an underscore.
+    """
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        name = name.replace(char, "_")
+    return name
+
+
 def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
     file_url = post["file_url"]
     file_name = file_url.split("/")[-1]
 
     folder_name = get_folder_name(character_tags, copyright_tag)
+    folder_name = sanitize_for_path(folder_name)  # Sanitize the folder name
     path = f"{folder_name}/{sensitivity}"
     if not os.path.exists(path):
         os.makedirs(path)
 
     if folder_name != "No Character" and "Multiple" not in folder_name:
         for character in character_tags:
-            character = character.replace(":", "-")
+            character = sanitize_for_path(
+                character.replace(":", "-")
+            )  # Sanitize each character name
             char_path = f"{character}/{sensitivity}"
             if not os.path.exists(char_path):
                 os.makedirs(char_path)
@@ -314,7 +328,7 @@ def process_post(post):
     # Check if the post has been processed already
     if post_id in posts_cache:
         print(f"Skipping post {post_id} as it has already been processed")
-        return
+        return False  # Indicate no download occurred
 
     character_tags = get_character_tags(post["tags"])
     copyright_tag = get_copyright_tag(post["tags"])
@@ -331,10 +345,12 @@ def process_post(post):
         print(
             f"Skipping download of image {file_name} for post {post['id']} because it already exists"
         )
+        return False  # Indicate no download occurred
     else:
         download_and_save_image(post, character_tags, sensitivity, copyright_tag)
+        return True  # Indicate a download occurred
 
-    # Update posts cache
+    # Update posts cache (This is now outside the condition)
     posts_cache[post_id] = True
     save_posts_cache(posts_cache)
 
@@ -372,28 +388,19 @@ def main():
         with ThreadPoolExecutor() as executor:
             post_details_list = list(executor.map(get_post_details, post_ids))
 
-        downloaded_images = (
-            False  # Flag to check if any images were downloaded on the current page
-        )
+        downloaded_images = False  # Initialize the flag for each page
 
         for post_details in post_details_list:
-            if post_details == "SKIP":
-                continue
-
-            if post_details is None or not post_details or post_details[0] is None:
-                log_message("Post details not found")
-                continue
-
-            post_id = post_details[0]["id"]
-            if str(post_id) in posts_cache:
-                print(f"Skipping post {post_id} as it has already been processed")
+            if (
+                post_details == "SKIP"
+                or post_details is None
+                or not post_details
+                or post_details[0] is None
+            ):
                 continue
 
             if process_post(post_details[0]):
-                downloaded_images = True
-                # Update posts cache
-                posts_cache[str(post_id)] = True
-                save_posts_cache(posts_cache)
+                downloaded_images = True  # Update flag based on the return value
 
         if not downloaded_images:
             consecutive_empty_pages += 1
@@ -401,6 +408,7 @@ def main():
             consecutive_empty_pages = 0
 
         if len(post_ids) < POSTS_PER_PAGE:
+            print("Reached the last page of favorite posts.")
             break
 
         pid += POSTS_PER_PAGE
