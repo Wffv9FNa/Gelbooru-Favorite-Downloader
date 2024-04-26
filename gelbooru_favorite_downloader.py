@@ -17,6 +17,7 @@ MAX_CONSECUTIVE_EMPTY_PAGES = 10
 CACHE_FILE = "tag_cache.json"
 POSTS_CACHE_FILE = "posts_cache.json"
 FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 file_lock = threading.Lock()
 
 
@@ -138,20 +139,22 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
     file_url = post["file_url"]
     file_name = file_url.split("/")[-1]
 
-    folder_name = get_folder_name(character_tags, copyright_tag)
-    folder_name = sanitize_for_path(folder_name)  # Sanitize the folder name
-    path = f"{folder_name}/{sensitivity}"
+    base_folder_name, specific_folder_name = get_folder_name(
+        character_tags, copyright_tag
+    )
+    base_folder_name = sanitize_for_path(
+        base_folder_name
+    )  # Sanitize the base folder name
+
+    if specific_folder_name:
+        path = os.path.join(
+            BASE_DIR, base_folder_name, specific_folder_name, sensitivity
+        )
+    else:
+        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
+
     if not os.path.exists(path):
         os.makedirs(path)
-
-    if folder_name != "No Character" and "Multiple" not in folder_name:
-        for character in character_tags:
-            character = sanitize_for_path(
-                character.replace(":", "-")
-            )  # Sanitize each character name
-            char_path = f"{character}/{sensitivity}"
-            if not os.path.exists(char_path):
-                os.makedirs(char_path)
 
     file_path = os.path.join(path, file_name)
 
@@ -308,14 +311,14 @@ def get_sensitivity(post):
 
 def get_folder_name(character_tags, copyright_tag):
     if not character_tags:
-        return "No Character"
+        return ("No Character", None)
     elif len(character_tags) == 1:
-        return character_tags[0].replace(":", "-")
+        return (character_tags[0].replace(":", "-"), None)
     else:
         if copyright_tag:
-            return f"Multiple/{copyright_tag.replace(':', '-')}"
+            return ("Multiple", copyright_tag.replace(":", "-"))
         else:
-            return "Multiple"
+            return ("Multiple", None)
 
 
 def process_post(post):
@@ -338,21 +341,41 @@ def process_post(post):
     file_url = post["file_url"]
     file_name = file_url.split("/")[-1]
     sensitivity = get_sensitivity(post)
-    folder_name = get_folder_name(character_tags, copyright_tag)
-    file_path = os.path.join(folder_name, sensitivity, file_name)
+
+    base_folder_name, specific_folder_name = get_folder_name(
+        character_tags, copyright_tag
+    )
+    base_folder_name = sanitize_for_path(
+        base_folder_name
+    )  # Sanitize the base folder name
+
+    # Construct the path based on whether there is a specific folder name
+    if specific_folder_name:
+        path = os.path.join(
+            BASE_DIR, base_folder_name, specific_folder_name, sensitivity
+        )
+    else:
+        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
+
+    file_path = os.path.join(path, file_name)
 
     if os.path.exists(file_path):
         print(
             f"Skipping download of image {file_name} for post {post['id']} because it already exists"
         )
+        posts_cache[post_id] = True
+        save_posts_cache(posts_cache)
         return False  # Indicate no download occurred
     else:
         download_and_save_image(post, character_tags, sensitivity, copyright_tag)
-        return True  # Indicate a download occurred
 
-    # Update posts cache (This is now outside the condition)
+    # Update posts cache (This should be done whether the file was newly downloaded or already existed)
     posts_cache[post_id] = True
     save_posts_cache(posts_cache)
+
+    return not os.path.exists(
+        file_path
+    )  # Indicate a download occurred only if the file was not previously existing
 
 
 # Main function
