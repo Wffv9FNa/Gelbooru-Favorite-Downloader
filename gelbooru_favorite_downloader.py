@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+import signal
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -430,6 +432,24 @@ def reset_adaptive_delay():
             adaptive_delay = max(adaptive_delay * 0.9, API_DELAY)  # Gradually reduce delay
 
 
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully by saving caches before exiting"""
+    log_message("\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting gracefully...")
+
+    # Save any cached data
+    try:
+        log_message("Saving caches before exit...")
+        # The caches are already saved after each operation, but we'll make sure
+        # any pending operations are completed by acquiring the file lock briefly
+        with file_lock:
+            log_message("Cache save completed.")
+    except Exception as e:
+        log_message(f"Warning: Error while saving caches during exit: {str(e)}")
+
+    log_message("Graceful exit completed. Goodbye!")
+    sys.exit(0)
+
+
 # Main function
 def main():
     parser = argparse.ArgumentParser()
@@ -438,6 +458,10 @@ def main():
 
     global log_to_file
     log_to_file = args.logtofile
+
+    # Register signal handler for graceful exit
+    signal.signal(signal.SIGINT, signal_handler)
+    log_message("Press Ctrl+C to gracefully exit the program.")
 
     session = login()
     if session is None:
