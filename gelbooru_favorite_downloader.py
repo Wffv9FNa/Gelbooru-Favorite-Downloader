@@ -20,6 +20,12 @@ FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 file_lock = threading.Lock()
 
+# Rate limiting settings
+API_DELAY = 0.1  # Delay between API calls in seconds (10 requests per second limit)
+last_api_call_time = 0
+api_call_lock = threading.Lock()
+adaptive_delay = API_DELAY  # Adaptive delay that increases if we get rate limited
+
 
 # Logging functions
 def log_message(message, log_file="log.txt"):
@@ -71,9 +77,9 @@ def get_post_details(post_id):
         log_message(f"Post {post_id} is already in the cache. Skipping API request.")
         return "SKIP"
 
-    url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}"
+    url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
-    base_delay = 2
+    base_delay = 5  # Increased base delay for rate limiting
     failed_posts_cache = load_failed_posts_cache()
 
     for i in range(max_retries):
@@ -82,18 +88,24 @@ def get_post_details(post_id):
             response.raise_for_status()
 
             if response.status_code == 429:
+                handle_rate_limit_response()
                 raise requests.exceptions.RequestException("Too Many Requests")
 
             data = json.loads(response.text)
             if "post" in data:
                 post = data["post"]
+                reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
                 return post if isinstance(post, list) else [post]
             else:
+                reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
                 return None
 
         except requests.exceptions.RequestException as e:
+            if "Too Many Requests" in str(e):
+                handle_rate_limit_response()
+
             if i < max_retries - 1:
-                delay = base_delay * (i + 1)
+                delay = base_delay * (2 ** i)  # Exponential backoff
                 log_message(
                     f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
                 )
@@ -181,6 +193,9 @@ def get_tag_details(tag):
     if tag in cache:
         return cache[tag]
 
+    # Rate limit API calls
+    rate_limit_api_call()
+
     tag_details = None  # assign a default value
 
     # Fetch tag details from API
@@ -192,9 +207,9 @@ def get_tag_details(tag):
         .replace("&amp;", "&")
     )
     encoded_tag = quote(modified_tag)
-    url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}"
+    url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
-    base_delay = 2
+    base_delay = 5  # Increased base delay for rate limiting
 
     for i in range(max_retries):
         try:
@@ -202,20 +217,27 @@ def get_tag_details(tag):
             response.raise_for_status()
 
             if response.status_code == 429:
+                handle_rate_limit_response()
                 raise requests.exceptions.RequestException("Too Many Requests")
 
             data = json.loads(response.text)
             if data:
                 try:
                     tag_details = data["tag"][0]
+                    reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
                 except KeyError:
+                    reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
                     return None
             else:
+                reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
                 return None
 
         except requests.exceptions.RequestException as e:
+            if "Too Many Requests" in str(e):
+                handle_rate_limit_response()
+
             if i < max_retries - 1:
-                delay = base_delay * (i + 1)
+                delay = base_delay * (2 ** i)  # Exponential backoff
                 time.sleep(delay)
             else:
                 return None
@@ -378,6 +400,36 @@ def process_post(post):
     )  # Indicate a download occurred only if the file was not previously existing
 
 
+def rate_limit_api_call():
+    """Ensure we don't make API calls too frequently"""
+    global last_api_call_time, adaptive_delay
+    with api_call_lock:
+        current_time = time.time()
+        time_since_last_call = current_time - last_api_call_time
+        if time_since_last_call < adaptive_delay:
+            sleep_time = adaptive_delay - time_since_last_call
+            if sleep_time > 0.2:  # Only log if we're waiting more than 200ms
+                log_message(f"Rate limiting: waiting {sleep_time:.2f} seconds before next API call")
+            time.sleep(sleep_time)
+        last_api_call_time = time.time()
+
+
+def handle_rate_limit_response():
+    """Increase adaptive delay when we get rate limited"""
+    global adaptive_delay
+    with api_call_lock:
+        adaptive_delay = min(adaptive_delay * 2, 5.0)  # Double delay, max 5 seconds
+        log_message(f"Rate limited! Increasing adaptive delay to {adaptive_delay:.2f} seconds")
+
+
+def reset_adaptive_delay():
+    """Reset adaptive delay to normal when requests are successful"""
+    global adaptive_delay
+    with api_call_lock:
+        if adaptive_delay > API_DELAY:
+            adaptive_delay = max(adaptive_delay * 0.9, API_DELAY)  # Gradually reduce delay
+
+
 # Main function
 def main():
     parser = argparse.ArgumentParser()
@@ -408,12 +460,11 @@ def main():
 
         print(f"Page with pid={pid}: {len(post_ids)} favorite posts")
 
-        with ThreadPoolExecutor() as executor:
-            post_details_list = list(executor.map(get_post_details, post_ids))
-
         downloaded_images = False  # Initialize the flag for each page
 
-        for post_details in post_details_list:
+        for post_id in post_ids:
+            rate_limit_api_call()
+            post_details = get_post_details(post_id)
             if (
                 post_details == "SKIP"
                 or post_details is None
