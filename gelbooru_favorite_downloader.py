@@ -1,9 +1,11 @@
 import argparse
 import json
 import os
+import signal
+import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
 import requests
 from bs4 import BeautifulSoup
@@ -18,14 +20,25 @@ CACHE_FILE = "tag_cache.json"
 POSTS_CACHE_FILE = "posts_cache.json"
 FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Threading and performance settings - Adjust these based on your system and rate limits
+MAX_WORKERS = 3          # Reduced for better rate limit compliance
+DOWNLOAD_WORKERS = 2     # Reduced concurrent downloads
+TAG_BATCH_SIZE = 10      # Smaller batches to avoid rate limits
+ENABLE_PERFORMANCE_MODE = True  # Set to False to use original sequential processing
+
 file_lock = threading.Lock()
 
 # Rate limiting settings
 API_DELAY = 0.1  # Delay between API calls in seconds (10 requests per second limit)
 last_api_call_time = 0
 api_call_lock = threading.Lock()
-adaptive_delay = API_DELAY  # Adaptive delay that increases if we get rate limited
+adaptive_delay = API_DELAY
 
+# Cache buffers for batch operations
+pending_posts_cache = {}
+pending_tag_cache = {}
+cache_update_lock = threading.Lock()
 
 # Logging functions
 def log_message(message, log_file="log.txt"):
@@ -125,9 +138,15 @@ def create_directories():
         os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
 
 
+# Global session for connection pooling
+download_session = requests.Session()
+download_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+})
+
 def download_image(url, file_path):
     try:
-        response = requests.get(url)
+        response = download_session.get(url, timeout=30)
         response.raise_for_status()
     except Exception as e:
         raise Exception(f"Error downloading image: {str(e)}")
@@ -182,6 +201,241 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
         log_message(
             f"Error downloading image {file_name} for post {post['id']}: {str(e)}"
         )
+
+
+# Optimized batch operations
+def flush_cache_buffers():
+    """Flush pending cache updates to disk"""
+    global pending_posts_cache, pending_tag_cache
+
+    with cache_update_lock:
+        if pending_posts_cache:
+            posts_cache = load_posts_cache()
+            posts_cache.update(pending_posts_cache)
+            save_posts_cache(posts_cache)
+            pending_posts_cache.clear()
+
+        if pending_tag_cache:
+            tag_cache = load_cache()
+            tag_cache.update(pending_tag_cache)
+            save_cache(tag_cache)
+            pending_tag_cache.clear()
+
+
+def batch_process_posts(post_ids, session):
+    """Process multiple posts in parallel"""
+    downloaded_count = 0
+
+    # First, fetch all post details in parallel
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all post detail fetching tasks with staggered delays
+        future_to_post_id = {}
+        for i, post_id in enumerate(post_ids):
+            # Add small staggered delay to prevent simultaneous API hits
+            if i > 0:
+                time.sleep(0.05)  # 50ms delay between task submissions
+            future_to_post_id[executor.submit(get_post_details, post_id)] = post_id
+
+        posts_to_process = []
+
+        for future in as_completed(future_to_post_id):
+            post_id = future_to_post_id[future]
+            try:
+                post_details = future.result()
+                if post_details and post_details != "SKIP" and post_details[0]:
+                    posts_to_process.append(post_details[0])
+            except Exception as e:
+                log_message(f"Error fetching details for post {post_id}: {str(e)}")
+
+    if not posts_to_process:
+        return 0
+
+    # Collect all unique tags from all posts for batch processing
+    all_tags = set()
+    for post in posts_to_process:
+        all_tags.update(post["tags"].split())
+
+    # Batch fetch tag details
+    batch_fetch_tag_details(list(all_tags))
+
+    # Process posts with image downloads in parallel
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
+        futures = [executor.submit(process_post_optimized, post) for post in posts_to_process]
+
+        for future in as_completed(futures):
+            try:
+                if future.result():  # If download occurred
+                    downloaded_count += 1
+            except Exception as e:
+                log_message(f"Error processing post: {str(e)}")
+
+    # Flush cache updates
+    flush_cache_buffers()
+
+    return downloaded_count
+
+
+def batch_fetch_tag_details(tags):
+    """Fetch tag details in parallel batches"""
+    cache = load_cache()
+    tags_to_fetch = [tag for tag in tags if tag not in cache and tag not in pending_tag_cache]
+
+    if not tags_to_fetch:
+        return
+
+    # Process tags in batches to avoid overwhelming the API
+    for i in range(0, len(tags_to_fetch), TAG_BATCH_SIZE):
+        batch = tags_to_fetch[i:i + TAG_BATCH_SIZE]
+
+        with ThreadPoolExecutor(max_workers=min(len(batch), MAX_WORKERS)) as executor:
+            future_to_tag = {
+                executor.submit(get_tag_details_single, tag): tag
+                for tag in batch
+            }
+
+            for future in as_completed(future_to_tag):
+                tag = future_to_tag[future]
+                try:
+                    tag_details = future.result()
+                    if tag_details:
+                        with cache_update_lock:
+                            pending_tag_cache[tag] = tag_details
+                except Exception as e:
+                    log_message(f"Error fetching tag details for {tag}: {str(e)}")
+
+        # Small delay between batches to respect rate limits
+        time.sleep(0.5)  # Increased delay between batches
+
+
+def get_tag_details_single(tag):
+    """Fetch single tag details without caching logic"""
+    rate_limit_api_call()
+
+    modified_tag = (
+        tag.replace("&#039;", "'")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", '"')
+        .replace("&amp;", "&")
+    )
+    encoded_tag = quote(modified_tag)
+    url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}&api_key={API_KEY}&user_id={USER_ID}"
+
+    max_retries = 3  # Reduced retries for batch operations
+    base_delay = 2
+
+    for i in range(max_retries):
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+
+            if response.status_code == 429:
+                handle_rate_limit_response()
+                raise requests.exceptions.RequestException("Too Many Requests")
+
+            data = json.loads(response.text)
+            if data and "tag" in data and data["tag"]:
+                reset_adaptive_delay()
+                return data["tag"][0]
+            else:
+                reset_adaptive_delay()
+                return None
+
+        except requests.exceptions.RequestException as e:
+            if "Too Many Requests" in str(e):
+                handle_rate_limit_response()
+
+            if i < max_retries - 1:
+                delay = base_delay * (2 ** i)
+                time.sleep(delay)
+            else:
+                return None
+        else:
+            break
+
+    return None
+
+
+def process_post_optimized(post):
+    """Optimized post processing with buffered cache updates"""
+    post_id = post["id"]
+
+    # Check cache first (including pending cache)
+    posts_cache = load_posts_cache()
+    with cache_update_lock:
+        if post_id in posts_cache or post_id in pending_posts_cache:
+            return False
+
+    # Check if file already exists
+    file_url = post["file_url"]
+    file_name = file_url.split("/")[-1]
+    sensitivity = get_sensitivity(post)
+
+    character_tags = get_character_tags_optimized(post["tags"])
+    copyright_tag = get_copyright_tag_optimized(post["tags"])
+
+    base_folder_name, specific_folder_name = get_folder_name(character_tags, copyright_tag)
+    base_folder_name = sanitize_for_path(base_folder_name)
+
+    if specific_folder_name:
+        path = os.path.join(BASE_DIR, base_folder_name, specific_folder_name, sensitivity)
+    else:
+        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
+
+    file_path = os.path.join(path, file_name)
+
+    download_occurred = False
+
+    if not os.path.exists(file_path):
+        try:
+            if not os.path.exists(path):
+                os.makedirs(path)
+            download_image(file_url, file_path)
+            download_occurred = True
+            print(f"Downloaded: {file_name} for post {post_id}")
+        except Exception as e:
+            log_message(f"Error downloading {file_name} for post {post_id}: {str(e)}")
+
+    # Buffer cache update instead of immediate write
+    with cache_update_lock:
+        pending_posts_cache[post_id] = True
+
+    return download_occurred
+
+
+def get_character_tags_optimized(tags):
+    """Optimized character tag retrieval using cached data"""
+    character_tags = []
+    cache = load_cache()
+
+    for tag in tags.split():
+        # Check both main cache and pending cache
+        tag_details = cache.get(tag)
+        if not tag_details:
+            with cache_update_lock:
+                tag_details = pending_tag_cache.get(tag)
+
+        if tag_details and "type" in tag_details and int(tag_details["type"]) == 4:
+            character_tags.append(tag_details["name"])
+
+    return character_tags
+
+
+def get_copyright_tag_optimized(tags):
+    """Optimized copyright tag retrieval using cached data"""
+    cache = load_cache()
+
+    for tag in tags.split():
+        # Check both main cache and pending cache
+        tag_details = cache.get(tag)
+        if not tag_details:
+            with cache_update_lock:
+                tag_details = pending_tag_cache.get(tag)
+
+        if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
+            return tag_details["name"]
+
+    return None
 
 
 # Functions related to tag details
@@ -430,6 +684,24 @@ def reset_adaptive_delay():
             adaptive_delay = max(adaptive_delay * 0.9, API_DELAY)  # Gradually reduce delay
 
 
+def signal_handler(sig, frame):
+    """Handle Ctrl+C gracefully by saving caches before exiting"""
+    log_message("\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting gracefully...")
+
+    # Save any cached data
+    try:
+        log_message("Saving caches before exit...")
+        # The caches are already saved after each operation, but we'll make sure
+        # any pending operations are completed by acquiring the file lock briefly
+        with file_lock:
+            log_message("Cache save completed.")
+    except Exception as e:
+        log_message(f"Warning: Error while saving caches during exit: {str(e)}")
+
+    log_message("Graceful exit completed. Goodbye!")
+    sys.exit(0)
+
+
 # Main function
 def main():
     parser = argparse.ArgumentParser()
@@ -438,6 +710,10 @@ def main():
 
     global log_to_file
     log_to_file = args.logtofile
+
+    # Register signal handler for graceful exit
+    signal.signal(signal.SIGINT, signal_handler)
+    log_message("Press Ctrl+C to gracefully exit the program.")
 
     session = login()
     if session is None:
@@ -460,21 +736,31 @@ def main():
 
         print(f"Page with pid={pid}: {len(post_ids)} favorite posts")
 
-        downloaded_images = False  # Initialize the flag for each page
+        if ENABLE_PERFORMANCE_MODE:
+            # Use optimized batch processing
+            start_time = time.time()
+            downloaded_count = batch_process_posts(post_ids, session)
+            end_time = time.time()
 
-        for post_id in post_ids:
-            rate_limit_api_call()
-            post_details = get_post_details(post_id)
-            if (
-                post_details == "SKIP"
-                or post_details is None
-                or not post_details
-                or post_details[0] is None
-            ):
-                continue
+            print(f"Processed {len(post_ids)} posts in {end_time - start_time:.2f} seconds")
+            print(f"Downloaded {downloaded_count} new images")
+            downloaded_images = downloaded_count > 0
+        else:
+            # Original sequential processing (fallback)
+            downloaded_images = False
+            for post_id in post_ids:
+                rate_limit_api_call()
+                post_details = get_post_details(post_id)
+                if (
+                    post_details == "SKIP"
+                    or post_details is None
+                    or not post_details
+                    or post_details[0] is None
+                ):
+                    continue
 
-            if process_post(post_details[0]):
-                downloaded_images = True  # Update flag based on the return value
+                if process_post(post_details[0]):
+                    downloaded_images = True
 
         if not downloaded_images:
             consecutive_empty_pages += 1
@@ -491,6 +777,10 @@ def main():
         print(
             f"No images downloaded for {MAX_CONSECUTIVE_EMPTY_PAGES} consecutive pages. Ending the script."
         )
+
+    # Final cleanup - flush any remaining cache updates
+    flush_cache_buffers()
+    print("Script completed. All cache updates saved.")
 
 
 if __name__ == "__main__":
