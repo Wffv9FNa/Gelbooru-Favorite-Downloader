@@ -87,7 +87,7 @@ def get_post_details(post_id):
 
     # Check if the post is in the cache
     if post_id in posts_cache:
-        log_message(f"Post {post_id} is already in the cache. Skipping API request.")
+        log_message(f"Post {post_id:<8} is already in the cache. Skipping API request.")
         return "SKIP"
 
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
@@ -124,7 +124,7 @@ def get_post_details(post_id):
                 )
                 time.sleep(delay)
             else:
-                log_message(f"Error getting post details for post {post_id}: {str(e)}")
+                log_message(f"Error getting post details for post {post_id:<8}: {str(e)}")
                 # Save the post ID to the cache when it exceeds max retries
                 failed_posts_cache[post_id] = True
                 save_failed_posts_cache(failed_posts_cache)
@@ -190,8 +190,8 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
     file_path = os.path.join(path, file_name)
 
     if os.path.exists(file_path):
-        print(
-            f"Skipping download of image {file_name} for post {post['id']} because it already exists"
+        log_message(
+            f"Skipping download of image {file_name} for post {post['id']:<8} because it already exists"
         )
         return
 
@@ -199,7 +199,7 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
         download_image(file_url, file_path)
     except Exception as e:
         log_message(
-            f"Error downloading image {file_name} for post {post['id']}: {str(e)}"
+            f"Error downloading image {file_name} for post {post['id']:<8}: {str(e)}"
         )
 
 
@@ -392,9 +392,9 @@ def process_post_optimized(post):
                 os.makedirs(path)
             download_image(file_url, file_path)
             download_occurred = True
-            print(f"Downloaded: {file_name} for post {post_id}")
+            log_message(f"Downloaded: {file_name} for post {post_id:<8}")
         except Exception as e:
-            log_message(f"Error downloading {file_name} for post {post_id}: {str(e)}")
+            log_message(f"Error downloading {file_name} for post {post_id:<8}: {str(e)}")
 
     # Buffer cache update instead of immediate write
     with cache_update_lock:
@@ -599,19 +599,19 @@ def get_folder_name(character_tags, copyright_tag):
 
 def process_post(post):
     post_id = post["id"]
-    print(f"Processing post {post_id}")
+    log_message(f"Processing post {post_id:<8}")
 
     # Load posts cache
     posts_cache = load_posts_cache()
 
     # Check if the post has been processed already
     if post_id in posts_cache:
-        print(f"Skipping post {post_id} as it has already been processed")
+        log_message(f"Skipping post {post_id:<8} as it has already been processed")
         return False  # Indicate no download occurred
 
     character_tags = get_character_tags(post["tags"])
     copyright_tag = get_copyright_tag(post["tags"])
-    print(f"Character tags: {character_tags}")
+    log_message(f"Character tags: {character_tags}")
 
     # Check if the image file exists on disk before calling download_and_save_image
     file_url = post["file_url"]
@@ -636,8 +636,8 @@ def process_post(post):
     file_path = os.path.join(path, file_name)
 
     if os.path.exists(file_path):
-        print(
-            f"Skipping download of image {file_name} for post {post['id']} because it already exists"
+        log_message(
+            f"Skipping download of image {file_name} for post {post['id']:<8} because it already exists"
         )
         posts_cache[post_id] = True
         save_posts_cache(posts_cache)
