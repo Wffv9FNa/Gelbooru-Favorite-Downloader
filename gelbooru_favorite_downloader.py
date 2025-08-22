@@ -22,23 +22,38 @@ FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Threading and performance settings - Adjust these based on your system and rate limits
-MAX_WORKERS = 3          # Reduced for better rate limit compliance
-DOWNLOAD_WORKERS = 2     # Reduced concurrent downloads
-TAG_BATCH_SIZE = 10      # Smaller batches to avoid rate limits
+MAX_WORKERS = 3  # Reduced for better rate limit compliance
+DOWNLOAD_WORKERS = 2  # Reduced concurrent downloads
+TAG_BATCH_SIZE = 10  # Smaller batches to avoid rate limits
 ENABLE_PERFORMANCE_MODE = True  # Set to False to use original sequential processing
 
 file_lock = threading.Lock()
 
 # Rate limiting settings
-API_DELAY = 0.1  # Delay between API calls in seconds (10 requests per second limit)
+API_DELAY = (
+    0.1  # Base delay between API calls in seconds (10 requests per second limit)
+)
+MIN_DELAY = 0.1  # Minimum delay between requests
+MAX_DELAY = 5.0  # Maximum delay between requests
+DELAY_INCREASE_FACTOR = (
+    1.5  # How much to increase delay on rate limit (less aggressive than 2.0)
+)
+DELAY_DECREASE_FACTOR = 0.9  # How much to decrease delay on success
+SUCCESS_THRESHOLD = 10  # Number of successful requests before reducing delay
+RATE_LIMITED_POSTS_FILE = "rate_limited_posts.json"  # File to track rate-limited posts
+
 last_api_call_time = 0
 api_call_lock = threading.Lock()
 adaptive_delay = API_DELAY
+successful_requests = 0  # Counter for successful requests
+rate_limited_posts = set()  # Track currently rate-limited posts
+rate_limited_lock = threading.Lock()
 
 # Cache buffers for batch operations
 pending_posts_cache = {}
 pending_tag_cache = {}
 cache_update_lock = threading.Lock()
+
 
 # Logging functions
 def log_message(message, log_file="log.txt"):
@@ -102,32 +117,50 @@ def get_post_details(post_id):
 
             if response.status_code == 429:
                 handle_rate_limit_response()
+                add_rate_limited_post(post_id)  # Track rate-limited post
                 raise requests.exceptions.RequestException("Too Many Requests")
 
             data = json.loads(response.text)
             if "post" in data:
                 post = data["post"]
                 reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
+                if i > 0:  # If this was a retry attempt
+                    log_message(
+                        f"Successfully retrieved post {post_id} after {i+1} attempts"
+                    )
+                remove_rate_limited_post(post_id)  # Remove from tracking if successful
                 return post if isinstance(post, list) else [post]
             else:
                 reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
+                remove_rate_limited_post(
+                    post_id
+                )  # Remove from tracking if request completed
                 return None
 
         except requests.exceptions.RequestException as e:
             if "Too Many Requests" in str(e):
                 handle_rate_limit_response()
+                add_rate_limited_post(post_id)  # Track rate-limited post
+                log_message(
+                    f"Rate limit hit for post {post_id:<8} - Attempt {i + 1}/{max_retries}"
+                )
 
             if i < max_retries - 1:
-                delay = base_delay * (2 ** i)  # Exponential backoff
+                delay = base_delay * (2**i)  # Exponential backoff
                 log_message(
-                    f"Encountered error: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
+                    f"Post {post_id:<8}: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
                 )
                 time.sleep(delay)
             else:
-                log_message(f"Error getting post details for post {post_id:<8}: {str(e)}")
+                log_message(
+                    f"Failed to get post {post_id:<8} after {max_retries} attempts: {str(e)}"
+                )
                 # Save the post ID to the cache when it exceeds max retries
                 failed_posts_cache[post_id] = True
                 save_failed_posts_cache(failed_posts_cache)
+                remove_rate_limited_post(
+                    post_id
+                )  # Remove from tracking after max retries
                 return None
 
 
@@ -140,9 +173,10 @@ def create_directories():
 
 # Global session for connection pooling
 download_session = requests.Session()
-download_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-})
+download_session.headers.update(
+    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+)
+
 
 def download_image(url, file_path):
     try:
@@ -225,6 +259,9 @@ def flush_cache_buffers():
 def batch_process_posts(post_ids, session):
     """Process multiple posts in parallel"""
     downloaded_count = 0
+    retry_count = 0
+    rate_limited_count = 0
+    failed_count = 0
 
     # First, fetch all post details in parallel
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -244,10 +281,21 @@ def batch_process_posts(post_ids, session):
                 post_details = future.result()
                 if post_details and post_details != "SKIP" and post_details[0]:
                     posts_to_process.append(post_details[0])
+                elif post_details == "SKIP":
+                    pass
+                else:
+                    failed_count += 1
             except Exception as e:
-                log_message(f"Error fetching details for post {post_id}: {str(e)}")
+                if "Too Many Requests" in str(e):
+                    rate_limited_count += 1
+                else:
+                    failed_count += 1
+                log_message(f"Error fetching details for post {post_id:<8}: {str(e)}")
 
     if not posts_to_process:
+        log_message(f"\nBatch Summary:")
+        log_message(f"  - Rate Limited: {rate_limited_count}")
+        log_message(f"  - Failed: {failed_count}")
         return 0
 
     # Collect all unique tags from all posts for batch processing
@@ -260,17 +308,28 @@ def batch_process_posts(post_ids, session):
 
     # Process posts with image downloads in parallel
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
-        futures = [executor.submit(process_post_optimized, post) for post in posts_to_process]
+        futures = [
+            executor.submit(process_post_optimized, post) for post in posts_to_process
+        ]
 
         for future in as_completed(futures):
             try:
                 if future.result():  # If download occurred
                     downloaded_count += 1
             except Exception as e:
+                failed_count += 1
                 log_message(f"Error processing post: {str(e)}")
 
     # Flush cache updates
     flush_cache_buffers()
+
+    # Print final batch summary
+    log_message(f"\nBatch Summary:")
+    log_message(f"  - Successfully Downloaded: {downloaded_count}")
+    log_message(f"  - Rate Limited: {rate_limited_count}")
+    log_message(f"  - Failed: {failed_count}")
+    if rate_limited_count > 0:
+        log_message(f"  - Rate-limited posts will be retried in the next run")
 
     return downloaded_count
 
@@ -278,19 +337,20 @@ def batch_process_posts(post_ids, session):
 def batch_fetch_tag_details(tags):
     """Fetch tag details in parallel batches"""
     cache = load_cache()
-    tags_to_fetch = [tag for tag in tags if tag not in cache and tag not in pending_tag_cache]
+    tags_to_fetch = [
+        tag for tag in tags if tag not in cache and tag not in pending_tag_cache
+    ]
 
     if not tags_to_fetch:
         return
 
     # Process tags in batches to avoid overwhelming the API
     for i in range(0, len(tags_to_fetch), TAG_BATCH_SIZE):
-        batch = tags_to_fetch[i:i + TAG_BATCH_SIZE]
+        batch = tags_to_fetch[i : i + TAG_BATCH_SIZE]
 
         with ThreadPoolExecutor(max_workers=min(len(batch), MAX_WORKERS)) as executor:
             future_to_tag = {
-                executor.submit(get_tag_details_single, tag): tag
-                for tag in batch
+                executor.submit(get_tag_details_single, tag): tag for tag in batch
             }
 
             for future in as_completed(future_to_tag):
@@ -346,7 +406,7 @@ def get_tag_details_single(tag):
                 handle_rate_limit_response()
 
             if i < max_retries - 1:
-                delay = base_delay * (2 ** i)
+                delay = base_delay * (2**i)
                 time.sleep(delay)
             else:
                 return None
@@ -360,10 +420,12 @@ def process_post_optimized(post):
     """Optimized post processing with buffered cache updates"""
     post_id = post["id"]
 
-    # Check cache first (including pending cache)
+    # Safety check in case this function is called directly
+    # Normally cached posts are filtered out earlier in batch_process_posts
     posts_cache = load_posts_cache()
     with cache_update_lock:
         if post_id in posts_cache or post_id in pending_posts_cache:
+            log_message(f"Post {post_id:<8} found in cache during processing, skipping")
             return False
 
     # Check if file already exists
@@ -374,11 +436,15 @@ def process_post_optimized(post):
     character_tags = get_character_tags_optimized(post["tags"])
     copyright_tag = get_copyright_tag_optimized(post["tags"])
 
-    base_folder_name, specific_folder_name = get_folder_name(character_tags, copyright_tag)
+    base_folder_name, specific_folder_name = get_folder_name(
+        character_tags, copyright_tag
+    )
     base_folder_name = sanitize_for_path(base_folder_name)
 
     if specific_folder_name:
-        path = os.path.join(BASE_DIR, base_folder_name, specific_folder_name, sensitivity)
+        path = os.path.join(
+            BASE_DIR, base_folder_name, specific_folder_name, sensitivity
+        )
     else:
         path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
 
@@ -394,7 +460,9 @@ def process_post_optimized(post):
             download_occurred = True
             log_message(f"Downloaded: {file_name} for post {post_id:<8}")
         except Exception as e:
-            log_message(f"Error downloading {file_name} for post {post_id:<8}: {str(e)}")
+            log_message(
+                f"Error downloading {file_name} for post {post_id:<8}: {str(e)}"
+            )
 
     # Buffer cache update instead of immediate write
     with cache_update_lock:
@@ -491,7 +559,7 @@ def get_tag_details(tag):
                 handle_rate_limit_response()
 
             if i < max_retries - 1:
-                delay = base_delay * (2 ** i)  # Exponential backoff
+                delay = base_delay * (2**i)  # Exponential backoff
                 time.sleep(delay)
             else:
                 return None
@@ -521,6 +589,38 @@ def get_copyright_tag(tags):
         if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
             return tag_details["name"]
     return None
+
+
+# Functions for managing rate-limited posts
+def load_rate_limited_posts():
+    """Load the set of rate-limited posts from disk"""
+    try:
+        with open(RATE_LIMITED_POSTS_FILE, "r") as f:
+            return set(json.load(f))
+    except FileNotFoundError:
+        return set()
+
+
+def save_rate_limited_posts():
+    """Save the current set of rate-limited posts to disk"""
+    with rate_limited_lock:
+        with open(RATE_LIMITED_POSTS_FILE, "w") as f:
+            json.dump(list(rate_limited_posts), f)
+
+
+def add_rate_limited_post(post_id):
+    """Add a post to the rate-limited tracking set"""
+    with rate_limited_lock:
+        rate_limited_posts.add(post_id)
+        save_rate_limited_posts()
+
+
+def remove_rate_limited_post(post_id):
+    """Remove a post from the rate-limited tracking set"""
+    with rate_limited_lock:
+        if post_id in rate_limited_posts:
+            rate_limited_posts.remove(post_id)
+            save_rate_limited_posts()
 
 
 # Functions related to cache handling
@@ -663,30 +763,45 @@ def rate_limit_api_call():
         if time_since_last_call < adaptive_delay:
             sleep_time = adaptive_delay - time_since_last_call
             if sleep_time > 0.2:  # Only log if we're waiting more than 200ms
-                log_message(f"Rate limiting: waiting {sleep_time:.2f} seconds before next API call")
+                log_message(
+                    f"Rate limiting: waiting {sleep_time:.2f} seconds before next API call"
+                )
             time.sleep(sleep_time)
         last_api_call_time = time.time()
 
 
 def handle_rate_limit_response():
     """Increase adaptive delay when we get rate limited"""
-    global adaptive_delay
+    global adaptive_delay, successful_requests
     with api_call_lock:
-        adaptive_delay = min(adaptive_delay * 2, 5.0)  # Double delay, max 5 seconds
-        log_message(f"Rate limited! Increasing adaptive delay to {adaptive_delay:.2f} seconds")
+        old_delay = adaptive_delay
+        adaptive_delay = min(adaptive_delay * DELAY_INCREASE_FACTOR, MAX_DELAY)
+        successful_requests = 0  # Reset success counter on rate limit
+        log_message(
+            f"Rate limit encountered - Adjusting delay from {old_delay:.2f}s to {adaptive_delay:.2f}s"
+        )
 
 
 def reset_adaptive_delay():
     """Reset adaptive delay to normal when requests are successful"""
-    global adaptive_delay
+    global adaptive_delay, successful_requests
     with api_call_lock:
-        if adaptive_delay > API_DELAY:
-            adaptive_delay = max(adaptive_delay * 0.9, API_DELAY)  # Gradually reduce delay
+        successful_requests += 1
+        if successful_requests >= SUCCESS_THRESHOLD and adaptive_delay > MIN_DELAY:
+            old_delay = adaptive_delay
+            adaptive_delay = max(adaptive_delay * DELAY_DECREASE_FACTOR, MIN_DELAY)
+            if old_delay != adaptive_delay:
+                log_message(
+                    f"Reducing delay after {successful_requests} successful requests: {old_delay:.2f}s -> {adaptive_delay:.2f}s"
+                )
+            successful_requests = 0  # Reset counter after adjustment
 
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully by saving caches before exiting"""
-    log_message("\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting gracefully...")
+    log_message(
+        "\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting gracefully..."
+    )
 
     # Save any cached data
     try:
@@ -708,8 +823,15 @@ def main():
     parser.add_argument("-logtofile", help="log output to file", action="store_true")
     args = parser.parse_args()
 
-    global log_to_file
+    global log_to_file, rate_limited_posts
     log_to_file = args.logtofile
+
+    # Load any previously rate-limited posts
+    rate_limited_posts = load_rate_limited_posts()
+    if rate_limited_posts:
+        log_message(
+            f"Found {len(rate_limited_posts)} previously rate-limited posts to retry"
+        )
 
     # Register signal handler for graceful exit
     signal.signal(signal.SIGINT, signal_handler)
@@ -742,7 +864,9 @@ def main():
             downloaded_count = batch_process_posts(post_ids, session)
             end_time = time.time()
 
-            print(f"Processed {len(post_ids)} posts in {end_time - start_time:.2f} seconds")
+            print(
+                f"Processed {len(post_ids)} posts in {end_time - start_time:.2f} seconds"
+            )
             print(f"Downloaded {downloaded_count} new images")
             downloaded_images = downloaded_count > 0
         else:
@@ -780,6 +904,16 @@ def main():
 
     # Final cleanup - flush any remaining cache updates
     flush_cache_buffers()
+
+    # Report on any remaining rate-limited posts
+    remaining_rate_limited = len(rate_limited_posts)
+    if remaining_rate_limited > 0:
+        log_message(
+            f"\nWARNING: {remaining_rate_limited} posts are still rate-limited and will be retried next time:"
+        )
+        for post_id in sorted(rate_limited_posts):
+            log_message(f"  - Post {post_id:<8}")
+
     print("Script completed. All cache updates saved.")
 
 
