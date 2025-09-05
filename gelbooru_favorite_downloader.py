@@ -22,29 +22,28 @@ FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Threading and performance settings - Adjust these based on your system and rate limits
-MAX_WORKERS = 3  # Reduced for better rate limit compliance
-DOWNLOAD_WORKERS = 2  # Reduced concurrent downloads
-TAG_BATCH_SIZE = 10  # Smaller batches to avoid rate limits
+MAX_WORKERS = 4  # Maximum parallel requests
+DOWNLOAD_WORKERS = 3  # Reduced concurrent downloads
+TAG_BATCH_SIZE = 20  # Batch size for tag fetching
 ENABLE_PERFORMANCE_MODE = True  # Set to False to use original sequential processing
 
 file_lock = threading.Lock()
 
 # Rate limiting settings
-API_DELAY = (
-    0.1  # Base delay between API calls in seconds (10 requests per second limit)
-)
-MIN_DELAY = 0.1  # Minimum delay between requests
+MIN_DELAY = 0.25  # Minimum delay between requests (4 req/sec max)
 MAX_DELAY = 5.0  # Maximum delay between requests
-DELAY_INCREASE_FACTOR = (
-    1.5  # How much to increase delay on rate limit (less aggressive than 2.0)
-)
-DELAY_DECREASE_FACTOR = 0.9  # How much to decrease delay on success
-SUCCESS_THRESHOLD = 10  # Number of successful requests before reducing delay
+DELAY_INCREASE_FACTOR = 1.5  # Increase factor on rate limit
+DELAY_DECREASE_FACTOR = 0.95  # Slower decrease rate
+SUCCESS_THRESHOLD = 15  # More successful requests needed before reducing delay
+
+# Dynamic concurrency control
+current_max_workers = MAX_WORKERS  # This will be reduced when we hit rate limits
+workers_lock = threading.Lock()
 RATE_LIMITED_POSTS_FILE = "rate_limited_posts.json"  # File to track rate-limited posts
 
 last_api_call_time = 0
 api_call_lock = threading.Lock()
-adaptive_delay = API_DELAY
+adaptive_delay = MIN_DELAY  # Start with minimum delay
 successful_requests = 0  # Counter for successful requests
 rate_limited_posts = set()  # Track currently rate-limited posts
 rate_limited_lock = threading.Lock()
@@ -113,12 +112,12 @@ def get_post_details(post_id):
     for i in range(max_retries):
         try:
             response = requests.get(url)
-            response.raise_for_status()
-
             if response.status_code == 429:
                 handle_rate_limit_response()
                 add_rate_limited_post(post_id)  # Track rate-limited post
                 raise requests.exceptions.RequestException("Too Many Requests")
+
+            response.raise_for_status()
 
             data = json.loads(response.text)
             if "post" in data:
@@ -227,14 +226,16 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
         log_message(
             f"Skipping download of image {file_name} for post {post['id']:<8} because it already exists"
         )
-        return
+        return True  # Indicate success since file exists
 
     try:
         download_image(file_url, file_path)
+        return True  # Indicate successful download
     except Exception as e:
         log_message(
             f"Error downloading image {file_name} for post {post['id']:<8}: {str(e)}"
         )
+        return False  # Indicate failed download
 
 
 # Optimized batch operations
@@ -263,14 +264,14 @@ def batch_process_posts(post_ids, session):
     rate_limited_count = 0
     failed_count = 0
 
-    # First, fetch all post details in parallel
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    # First, fetch all post details in parallel with dynamic worker count
+    with ThreadPoolExecutor(max_workers=current_max_workers) as executor:
         # Submit all post detail fetching tasks with staggered delays
         future_to_post_id = {}
         for i, post_id in enumerate(post_ids):
             # Add small staggered delay to prevent simultaneous API hits
             if i > 0:
-                time.sleep(0.05)  # 50ms delay between task submissions
+                time.sleep(0.1)  # 100ms delay between task submissions
             future_to_post_id[executor.submit(get_post_details, post_id)] = post_id
 
         posts_to_process = []
@@ -293,9 +294,6 @@ def batch_process_posts(post_ids, session):
                 log_message(f"Error fetching details for post {post_id:<8}: {str(e)}")
 
     if not posts_to_process:
-        log_message(f"\nBatch Summary:")
-        log_message(f"  - Rate Limited: {rate_limited_count}")
-        log_message(f"  - Failed: {failed_count}")
         return 0
 
     # Collect all unique tags from all posts for batch processing
@@ -322,15 +320,6 @@ def batch_process_posts(post_ids, session):
 
     # Flush cache updates
     flush_cache_buffers()
-
-    # Print final batch summary
-    log_message(f"\nBatch Summary:")
-    log_message(f"  - Successfully Downloaded: {downloaded_count}")
-    log_message(f"  - Rate Limited: {rate_limited_count}")
-    log_message(f"  - Failed: {failed_count}")
-    if rate_limited_count > 0:
-        log_message(f"  - Rate-limited posts will be retried in the next run")
-
     return downloaded_count
 
 
@@ -458,15 +447,23 @@ def process_post_optimized(post):
                 os.makedirs(path)
             download_image(file_url, file_path)
             download_occurred = True
-            log_message(f"Downloaded: {file_name} for post {post_id:<8}")
+            # "Downloaded: " is 11 chars, we want the "for post" part to start at the same position
+            download_msg = f"Downloaded: {file_name}"
+            padding = " " * (
+                56 - len(download_msg)
+            )  # 56 gives enough room for longest filenames
+            log_message(f"{download_msg}{padding}for post {post_id:<8}")
+            # Only add to cache if download succeeded
+            with cache_update_lock:
+                pending_posts_cache[post_id] = True
         except Exception as e:
             log_message(
                 f"Error downloading {file_name} for post {post_id:<8}: {str(e)}"
             )
-
-    # Buffer cache update instead of immediate write
-    with cache_update_lock:
-        pending_posts_cache[post_id] = True
+    else:
+        # File already exists, safe to cache
+        with cache_update_lock:
+            pending_posts_cache[post_id] = True
 
     return download_occurred
 
@@ -743,43 +740,52 @@ def process_post(post):
         save_posts_cache(posts_cache)
         return False  # Indicate no download occurred
     else:
-        download_and_save_image(post, character_tags, sensitivity, copyright_tag)
-
-    # Update posts cache (This should be done whether the file was newly downloaded or already existed)
-    posts_cache[post_id] = True
-    save_posts_cache(posts_cache)
-
-    return not os.path.exists(
-        file_path
-    )  # Indicate a download occurred only if the file was not previously existing
+        # Only update cache if download succeeds
+        if download_and_save_image(post, character_tags, sensitivity, copyright_tag):
+            posts_cache[post_id] = True
+            save_posts_cache(posts_cache)
+            return True  # Indicate download occurred
+        return False  # Download failed
 
 
 def rate_limit_api_call():
     """Ensure we don't make API calls too frequently"""
     global last_api_call_time, adaptive_delay
+
     with api_call_lock:
         current_time = time.time()
         time_since_last_call = current_time - last_api_call_time
+
         if time_since_last_call < adaptive_delay:
             sleep_time = adaptive_delay - time_since_last_call
-            if sleep_time > 0.2:  # Only log if we're waiting more than 200ms
-                log_message(
-                    f"Rate limiting: waiting {sleep_time:.2f} seconds before next API call"
-                )
             time.sleep(sleep_time)
+
         last_api_call_time = time.time()
 
 
 def handle_rate_limit_response():
-    """Increase adaptive delay when we get rate limited"""
-    global adaptive_delay, successful_requests
+    """Adjust rate limiting parameters when we hit a rate limit"""
+    global adaptive_delay, successful_requests, current_max_workers
+
     with api_call_lock:
         old_delay = adaptive_delay
         adaptive_delay = min(adaptive_delay * DELAY_INCREASE_FACTOR, MAX_DELAY)
         successful_requests = 0  # Reset success counter on rate limit
+
+        # Reduce concurrent workers when we hit rate limits
+        with workers_lock:
+            old_workers = current_max_workers
+            current_max_workers = max(
+                1, current_max_workers - 1
+            )  # Reduce workers but keep at least 1
+
         log_message(
-            f"Rate limit encountered - Adjusting delay from {old_delay:.2f}s to {adaptive_delay:.2f}s"
+            f"Rate limit hit - Increasing delay to {adaptive_delay:.2f}s, reducing workers to {current_max_workers}"
         )
+
+        # Force a longer pause after rate limit
+        sleep_time = adaptive_delay * 2
+        time.sleep(sleep_time)
 
 
 def reset_adaptive_delay():
@@ -787,12 +793,13 @@ def reset_adaptive_delay():
     global adaptive_delay, successful_requests
     with api_call_lock:
         successful_requests += 1
+
         if successful_requests >= SUCCESS_THRESHOLD and adaptive_delay > MIN_DELAY:
             old_delay = adaptive_delay
             adaptive_delay = max(adaptive_delay * DELAY_DECREASE_FACTOR, MIN_DELAY)
             if old_delay != adaptive_delay:
                 log_message(
-                    f"Reducing delay after {successful_requests} successful requests: {old_delay:.2f}s -> {adaptive_delay:.2f}s"
+                    f"Reducing delay to {adaptive_delay:.2f}s after {successful_requests} successful requests"
                 )
             successful_requests = 0  # Reset counter after adjustment
 
