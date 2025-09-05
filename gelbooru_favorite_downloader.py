@@ -265,6 +265,7 @@ def batch_process_posts(post_ids, session):
     failed_count = 0
 
     # First, fetch all post details in parallel with dynamic worker count
+    print(f"Fetching details for {len(post_ids)} posts using {current_max_workers} workers...")
     with ThreadPoolExecutor(max_workers=current_max_workers) as executor:
         # Submit all post detail fetching tasks with staggered delays
         future_to_post_id = {}
@@ -297,9 +298,11 @@ def batch_process_posts(post_ids, session):
         return 0
 
     # Collect all unique tags from all posts for batch processing
+    print(f"Processing {len(posts_to_process)} valid posts...")
     all_tags = set()
     for post in posts_to_process:
         all_tags.update(post["tags"].split())
+    print(f"Found {len(all_tags)} unique tags to process...")
 
     # Batch fetch tag details
     batch_fetch_tag_details(list(all_tags))
@@ -334,8 +337,13 @@ def batch_fetch_tag_details(tags):
         return
 
     # Process tags in batches to avoid overwhelming the API
+    total_batches = (len(tags_to_fetch) + TAG_BATCH_SIZE - 1) // TAG_BATCH_SIZE
+    print(f"Processing {len(tags_to_fetch)} new tags in {total_batches} batches...")
+
     for i in range(0, len(tags_to_fetch), TAG_BATCH_SIZE):
         batch = tags_to_fetch[i : i + TAG_BATCH_SIZE]
+        current_batch = (i // TAG_BATCH_SIZE) + 1
+        print(f"Processing tag batch {current_batch}/{total_batches}...")
 
         with ThreadPoolExecutor(max_workers=min(len(batch), MAX_WORKERS)) as executor:
             future_to_tag = {
@@ -864,6 +872,7 @@ def main():
             break
 
         print(f"Page with pid={pid}: {len(post_ids)} favorite posts")
+        print("Fetching post details and tag information...")
 
         if ENABLE_PERFORMANCE_MODE:
             # Use optimized batch processing
