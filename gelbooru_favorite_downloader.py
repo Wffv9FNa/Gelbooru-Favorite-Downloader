@@ -34,6 +34,12 @@ def load_config():
         print(f"Error: Invalid YAML in configuration file: {e}")
         sys.exit(1)
 
+    # Check for empty config file
+    if config is None:
+        print("Error: Configuration file is empty.")
+        print("Please copy config.yaml.example to config.yaml and fill in your settings.")
+        sys.exit(1)
+
     # Validate required sections
     required_sections = ["api", "settings", "cache", "threading", "rate_limiting"]
     for section in required_sections:
@@ -134,6 +140,20 @@ def log_message(message, log_file="log.txt"):
             file.write(message + "\\n")
 
 
+def countdown_sleep(seconds, reason="Waiting"):
+    """Sleep with a visible countdown timer so users know the script is still working."""
+    total = int(seconds)
+    for remaining in range(total, 0, -1):
+        print(f"\r{reason}: {remaining}s remaining...  ", end="", flush=True)
+        time.sleep(1)
+    # Sleep any fractional remainder
+    remainder = seconds - total
+    if remainder > 0:
+        time.sleep(remainder)
+    # Clear the countdown line
+    print(f"\r{reason}: Done.{' ' * 20}", flush=True)
+
+
 # Login function
 def login():
     session = requests.Session()
@@ -169,6 +189,7 @@ def get_favorite_post_ids(session, pid):
 
 def get_post_details(post_id):
     # Load posts cache
+    print(f"[{post_id}] Starting...", flush=True)
     posts_cache = load_posts_cache()
 
     # Check if the post is in the cache
@@ -179,11 +200,15 @@ def get_post_details(post_id):
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
     base_delay = 5  # Increased base delay for rate limiting
+    print(f"[{post_id}] Loading failed cache...", flush=True)
     failed_posts_cache = load_failed_posts_cache()
+    print(f"[{post_id}] Failed cache loaded", flush=True)
 
     for i in range(max_retries):
         try:
-            response = requests.get(url)
+            print(f"[{post_id}] Making request (attempt {i+1})...", flush=True)
+            response = requests.get(url, timeout=30)
+            print(f"[{post_id}] Got response: {response.status_code}", flush=True)
             if response.status_code == 429:
                 handle_rate_limit_response()
                 add_rate_limited_post(post_id)  # Track rate-limited post
@@ -219,9 +244,9 @@ def get_post_details(post_id):
             if i < max_retries - 1:
                 delay = base_delay * (2**i)  # Exponential backoff
                 log_message(
-                    f"Post {post_id:<8}: {str(e)}. Retrying after {delay} seconds (attempt {i + 1}/{max_retries})"
+                    f"Post {post_id:<8}: {str(e)}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
                 )
-                time.sleep(delay)
+                countdown_sleep(delay, f"Retry backoff for post {post_id}")
             else:
                 log_message(
                     f"Failed to get post {post_id:<8} after {max_retries} attempts: {str(e)}"
@@ -337,7 +362,8 @@ def batch_process_posts(post_ids, session):
     failed_count = 0
 
     # First, fetch all post details in parallel with dynamic worker count
-    print(f"Fetching details for {len(post_ids)} posts using {current_max_workers} workers...")
+    total_posts = len(post_ids)
+    print(f"Fetching details for {total_posts} posts using {current_max_workers} workers...")
     with ThreadPoolExecutor(max_workers=current_max_workers) as executor:
         # Submit all post detail fetching tasks with staggered delays
         future_to_post_id = {}
@@ -348,23 +374,29 @@ def batch_process_posts(post_ids, session):
             future_to_post_id[executor.submit(get_post_details, post_id)] = post_id
 
         posts_to_process = []
+        completed_count = 0
 
         for future in as_completed(future_to_post_id):
             post_id = future_to_post_id[future]
+            completed_count += 1
             try:
                 post_details = future.result()
                 if post_details and post_details != "SKIP" and post_details[0]:
                     posts_to_process.append(post_details[0])
+                    print(f"\rFetched post details: {completed_count}/{total_posts} (got: {len(posts_to_process)})  ", end="", flush=True)
                 elif post_details == "SKIP":
-                    pass
+                    print(f"\rFetched post details: {completed_count}/{total_posts} (cached)  ", end="", flush=True)
                 else:
                     failed_count += 1
+                    print(f"\rFetched post details: {completed_count}/{total_posts} (failed: {failed_count})  ", end="", flush=True)
             except Exception as e:
                 if "Too Many Requests" in str(e):
                     rate_limited_count += 1
                 else:
                     failed_count += 1
-                log_message(f"Error fetching details for post {post_id:<8}: {str(e)}")
+                log_message(f"\nError fetching details for post {post_id:<8}: {str(e)}")
+
+        print()  # New line after progress
 
     if not posts_to_process:
         return 0
@@ -476,6 +508,7 @@ def get_tag_details_single(tag):
 
             if i < max_retries - 1:
                 delay = base_delay * (2**i)
+                print(f"Tag '{tag}' retry in {delay}s...", flush=True)
                 time.sleep(delay)
             else:
                 return None
@@ -612,7 +645,7 @@ def get_tag_details(tag):
 
     for i in range(max_retries):
         try:
-            response = requests.get(url)
+            response = requests.get(url, timeout=30)
             response.raise_for_status()
 
             if response.status_code == 429:
@@ -637,7 +670,7 @@ def get_tag_details(tag):
 
             if i < max_retries - 1:
                 delay = base_delay * (2**i)  # Exponential backoff
-                time.sleep(delay)
+                countdown_sleep(delay, f"Retry backoff for tag '{tag}'")
             else:
                 return None
         else:
@@ -678,18 +711,23 @@ def load_rate_limited_posts():
         return set()
 
 
+def _save_rate_limited_posts_unlocked():
+    """Save rate-limited posts to disk. Must be called while holding rate_limited_lock."""
+    with open(RATE_LIMITED_POSTS_FILE, "w") as f:
+        json.dump(list(rate_limited_posts), f)
+
+
 def save_rate_limited_posts():
     """Save the current set of rate-limited posts to disk"""
     with rate_limited_lock:
-        with open(RATE_LIMITED_POSTS_FILE, "w") as f:
-            json.dump(list(rate_limited_posts), f)
+        _save_rate_limited_posts_unlocked()
 
 
 def add_rate_limited_post(post_id):
     """Add a post to the rate-limited tracking set"""
     with rate_limited_lock:
         rate_limited_posts.add(post_id)
-        save_rate_limited_posts()
+        _save_rate_limited_posts_unlocked()
 
 
 def remove_rate_limited_post(post_id):
@@ -697,7 +735,7 @@ def remove_rate_limited_post(post_id):
     with rate_limited_lock:
         if post_id in rate_limited_posts:
             rate_limited_posts.remove(post_id)
-            save_rate_limited_posts()
+            _save_rate_limited_posts_unlocked()
 
 
 # Functions related to cache handling
@@ -832,15 +870,24 @@ def rate_limit_api_call():
     """Ensure we don't make API calls too frequently"""
     global last_api_call_time, adaptive_delay
 
+    sleep_time = 0
     with api_call_lock:
         current_time = time.time()
         time_since_last_call = current_time - last_api_call_time
 
         if time_since_last_call < adaptive_delay:
             sleep_time = adaptive_delay - time_since_last_call
-            time.sleep(sleep_time)
+            # Reserve our slot by updating the time now
+            last_api_call_time = current_time + sleep_time
+        else:
+            last_api_call_time = current_time
 
-        last_api_call_time = time.time()
+    # Sleep OUTSIDE the lock so other threads aren't blocked
+    if sleep_time > 0:
+        if sleep_time >= 1:
+            countdown_sleep(sleep_time, "API rate limit wait")
+        else:
+            time.sleep(sleep_time)
 
 
 def handle_rate_limit_response():
@@ -865,7 +912,9 @@ def handle_rate_limit_response():
 
         # Force a longer pause after rate limit
         sleep_time = adaptive_delay * 2
-        time.sleep(sleep_time)
+
+    # Countdown outside the lock so other threads aren't blocked
+    countdown_sleep(sleep_time, "Rate limit cooldown")
 
 
 def reset_adaptive_delay():
@@ -886,22 +935,23 @@ def reset_adaptive_delay():
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully by saving caches before exiting"""
-    log_message(
-        "\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting gracefully..."
-    )
+    # Print immediately to confirm signal received
+    print("\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting...")
+    sys.stdout.flush()
 
-    # Save any cached data
+    # Save any pending cached data
     try:
-        log_message("Saving caches before exit...")
-        # The caches are already saved after each operation, but we'll make sure
-        # any pending operations are completed by acquiring the file lock briefly
-        with file_lock:
-            log_message("Cache save completed.")
+        print("Flushing cache buffers...")
+        sys.stdout.flush()
+        flush_cache_buffers()
+        print("Cache save completed.")
     except Exception as e:
-        log_message(f"Warning: Error while saving caches during exit: {str(e)}")
+        print(f"Warning: Error while saving caches during exit: {str(e)}")
 
-    log_message("Graceful exit completed. Goodbye!")
-    sys.exit(0)
+    print("Exiting. Goodbye!")
+    sys.stdout.flush()
+    # Use os._exit() to forcefully terminate all threads immediately
+    os._exit(0)
 
 
 # Main function
