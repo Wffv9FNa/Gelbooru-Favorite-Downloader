@@ -11,6 +11,43 @@ from urllib.parse import quote
 import requests
 import yaml
 from bs4 import BeautifulSoup
+from colorama import init, Fore, Style
+
+# Initialise colorama for Windows compatibility
+init(autoreset=True)
+
+
+# =============================================================================
+# Colour Helpers
+# =============================================================================
+def c_success(text):
+    """Green - for successful operations"""
+    return f"{Fore.GREEN}{text}{Style.RESET_ALL}"
+
+
+def c_warning(text):
+    """Yellow - for warnings like rate limits"""
+    return f"{Fore.YELLOW}{text}{Style.RESET_ALL}"
+
+
+def c_error(text):
+    """Red - for errors"""
+    return f"{Fore.RED}{text}{Style.RESET_ALL}"
+
+
+def c_info(text):
+    """Cyan - for informational messages"""
+    return f"{Fore.CYAN}{text}{Style.RESET_ALL}"
+
+
+def c_header(text):
+    """Magenta - for section headers"""
+    return f"{Fore.MAGENTA}{Style.BRIGHT}{text}{Style.RESET_ALL}"
+
+
+def c_dim(text):
+    """Dim text for less important info"""
+    return f"{Style.DIM}{text}{Style.RESET_ALL}"
 
 # =============================================================================
 # Configuration Loading
@@ -361,7 +398,7 @@ def batch_process_posts(post_ids, session):
 
     # First, fetch all post details in parallel with dynamic worker count
     total_posts = len(post_ids)
-    print(f"Fetching details for {total_posts} posts using {current_max_workers} workers...")
+    print(c_info("Fetching post details..."))
     with ThreadPoolExecutor(max_workers=current_max_workers) as executor:
         # Submit all post detail fetching tasks with staggered delays
         future_to_post_id = {}
@@ -392,15 +429,18 @@ def batch_process_posts(post_ids, session):
                 else:
                     failed_count += 1
 
-            # Update progress bar
+            # Update progress bar with colours
             progress = int((completed_count / total_posts) * 20)
-            bar = "=" * progress + "-" * (20 - progress)
-            status_parts = [f"new: {len(posts_to_process)}"]
-            if cached_count > 0:
-                status_parts.append(f"cached: {cached_count}")
-            if failed_count > 0:
-                status_parts.append(f"failed: {failed_count}")
+            bar_done = Fore.GREEN + "=" * progress
+            bar_remaining = Fore.WHITE + "-" * (20 - progress)
+            bar = bar_done + bar_remaining + Style.RESET_ALL
+
+            new_count = c_success(f"new: {len(posts_to_process)}")
+            cached_str = c_dim(f"cached: {cached_count}") if cached_count > 0 else ""
+            failed_str = c_error(f"failed: {failed_count}") if failed_count > 0 else ""
+            status_parts = [s for s in [new_count, cached_str, failed_str] if s]
             status = ", ".join(status_parts)
+
             print(f"\r  [{bar}] {completed_count}/{total_posts} ({status})  ", end="", flush=True)
 
         print()  # New line after progress
@@ -409,7 +449,7 @@ def batch_process_posts(post_ids, session):
         return 0
 
     # Collect all unique tags from all posts for batch processing
-    print(f"Processing {len(posts_to_process)} valid posts...")
+    print(c_info("Processing tags..."))
     all_tags = set()
     for post in posts_to_process:
         all_tags.update(post["tags"].split())
@@ -450,7 +490,7 @@ def batch_fetch_tag_details(tags):
     # Process tags in batches to avoid overwhelming the API
     total_tags = len(tags_to_fetch)
     total_batches = (total_tags + TAG_BATCH_SIZE - 1) // TAG_BATCH_SIZE
-    print(f"Fetching {total_tags} new tag details...")
+    print(c_info(f"Fetching {total_tags} new tag details..."))
     tags_completed = 0
 
     for i in range(0, total_tags, TAG_BATCH_SIZE):
@@ -472,9 +512,11 @@ def batch_fetch_tag_details(tags):
                 except Exception as e:
                     pass  # Silently skip tag errors
 
-                # Update progress bar
+                # Update progress bar with colours
                 progress = int((tags_completed / total_tags) * 20)
-                bar = "=" * progress + "-" * (20 - progress)
+                bar_done = Fore.CYAN + "=" * progress
+                bar_remaining = Fore.WHITE + "-" * (20 - progress)
+                bar = bar_done + bar_remaining + Style.RESET_ALL
                 print(f"\r  [{bar}] {tags_completed}/{total_tags} tags  ", end="", flush=True)
 
         # Small delay between batches to respect rate limits
@@ -574,19 +616,13 @@ def process_post_optimized(post):
                 os.makedirs(path)
             download_image(file_url, file_path)
             download_occurred = True
-            # "Downloaded: " is 11 chars, we want the "for post" part to start at the same position
-            download_msg = f"Downloaded: {file_name}"
-            padding = " " * (
-                56 - len(download_msg)
-            )  # 56 gives enough room for longest filenames
-            log_message(f"{download_msg}{padding}for post {post_id:<8}")
+            # Format download message with colour
+            print(f"  {c_success('+')} {c_dim(file_name[:45])} {c_dim('post')} {post_id}")
             # Only add to cache if download succeeded
             with cache_update_lock:
                 pending_posts_cache[post_id] = True
         except Exception as e:
-            log_message(
-                f"Error downloading {file_name} for post {post_id:<8}: {str(e)}"
-            )
+            print(f"  {c_error('x')} {c_error('Failed:')} {file_name[:30]} - {str(e)[:30]}")
     else:
         # File already exists, safe to cache
         with cache_update_lock:
@@ -884,17 +920,20 @@ def rate_limit_api_call():
     """Ensure we don't make API calls too frequently"""
     global last_api_call_time, adaptive_delay
 
-    sleep_time = 0
     with api_call_lock:
         current_time = time.time()
-        time_since_last_call = current_time - last_api_call_time
+        # Calculate the earliest time we're allowed to make a call
+        earliest_allowed = last_api_call_time + adaptive_delay
 
-        if time_since_last_call < adaptive_delay:
-            sleep_time = adaptive_delay - time_since_last_call
-            # Reserve our slot by updating the time now
-            last_api_call_time = current_time + sleep_time
-        else:
+        if current_time >= earliest_allowed:
+            # We can call immediately, no waiting needed
+            sleep_time = 0
             last_api_call_time = current_time
+        else:
+            # We need to wait until our reserved slot
+            sleep_time = earliest_allowed - current_time
+            # Reserve this slot for ourselves
+            last_api_call_time = earliest_allowed
 
     # Sleep OUTSIDE the lock so other threads aren't blocked
     if sleep_time > 0:
@@ -921,13 +960,13 @@ def handle_rate_limit_response():
                 1, current_max_workers - 1
             )  # Reduce workers but keep at least 1
 
-        print(f"\n! Rate limited - backing off ({adaptive_delay:.1f}s delay)", flush=True)
+        print(c_warning(f"\n! Rate limited - backing off ({adaptive_delay:.1f}s delay)"), flush=True)
 
         # Force a longer pause after rate limit
         sleep_time = adaptive_delay * 2
 
     # Countdown outside the lock so other threads aren't blocked
-    countdown_sleep(sleep_time, "Rate limit cooldown")
+    countdown_sleep(sleep_time, c_warning("Rate limit cooldown"))
 
 
 def reset_adaptive_delay():
@@ -944,19 +983,17 @@ def reset_adaptive_delay():
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully by saving caches before exiting"""
     # Print immediately to confirm signal received
-    print("\n\nReceived interrupt signal (Ctrl+C). Saving progress and exiting...")
+    print(c_warning("\n\nInterrupted! Saving progress..."))
     sys.stdout.flush()
 
     # Save any pending cached data
     try:
-        print("Flushing cache buffers...")
-        sys.stdout.flush()
         flush_cache_buffers()
-        print("Cache save completed.")
+        print(c_success("Progress saved."))
     except Exception as e:
-        print(f"Warning: Error while saving caches during exit: {str(e)}")
+        print(c_error(f"Warning: Error saving caches: {str(e)}"))
 
-    print("Exiting. Goodbye!")
+    print(c_info("Goodbye!"))
     sys.stdout.flush()
     # Use os._exit() to forcefully terminate all threads immediately
     os._exit(0)
@@ -980,11 +1017,11 @@ def main():
 
     # Register signal handler for graceful exit
     signal.signal(signal.SIGINT, signal_handler)
-    log_message("Press Ctrl+C to gracefully exit the program.")
+    print(c_dim("Press Ctrl+C to gracefully exit the program."))
 
     session = login()
     if session is None:
-        log_message("Failed to log in. Exiting.")
+        print(c_error("Failed to log in. Exiting."))
         return
 
     # Load posts cache
@@ -998,22 +1035,25 @@ def main():
     while consecutive_empty_pages < MAX_CONSECUTIVE_EMPTY_PAGES:
         post_ids = get_favorite_post_ids(session, pid)
         if post_ids is None or not post_ids:
-            print(f"No more favorite posts found at pid={pid}")
+            print(c_info("No more favourite posts found."))
             break
 
-        print(f"Page with pid={pid}: {len(post_ids)} favorite posts")
-        print("Fetching post details and tag information...")
+        page_num = (pid // POSTS_PER_PAGE) + 1
+        print(c_header(f"\n{'='*60}"))
+        print(c_header(f"  Page {page_num} - {len(post_ids)} favourite posts"))
+        print(c_header(f"{'='*60}"))
 
         if ENABLE_PERFORMANCE_MODE:
-            # Use optimized batch processing
+            # Use optimised batch processing
             start_time = time.time()
             downloaded_count = batch_process_posts(post_ids, session)
             end_time = time.time()
 
-            print(
-                f"Processed {len(post_ids)} posts in {end_time - start_time:.2f} seconds"
-            )
-            print(f"Downloaded {downloaded_count} new images")
+            elapsed = end_time - start_time
+            if downloaded_count > 0:
+                print(c_success(f"Downloaded {downloaded_count} new images") + c_dim(f" in {elapsed:.1f}s"))
+            else:
+                print(c_dim(f"No new images (all cached) - {elapsed:.1f}s"))
             downloaded_images = downloaded_count > 0
         else:
             # Original sequential processing (fallback)
@@ -1038,15 +1078,13 @@ def main():
             consecutive_empty_pages = 0
 
         if len(post_ids) < POSTS_PER_PAGE:
-            print("Reached the last page of favorite posts.")
+            print(c_info("\nReached the last page of favourite posts."))
             break
 
         pid += POSTS_PER_PAGE
 
     if consecutive_empty_pages >= MAX_CONSECUTIVE_EMPTY_PAGES:
-        print(
-            f"No images downloaded for {MAX_CONSECUTIVE_EMPTY_PAGES} consecutive pages. Ending the script."
-        )
+        print(c_info(f"\nNo new images for {MAX_CONSECUTIVE_EMPTY_PAGES} consecutive pages."))
 
     # Final cleanup - flush any remaining cache updates
     flush_cache_buffers()
@@ -1054,13 +1092,11 @@ def main():
     # Report on any remaining rate-limited posts
     remaining_rate_limited = len(rate_limited_posts)
     if remaining_rate_limited > 0:
-        log_message(
-            f"\nWARNING: {remaining_rate_limited} posts are still rate-limited and will be retried next time:"
-        )
-        for post_id in sorted(rate_limited_posts):
-            log_message(f"  - Post {post_id:<8}")
+        print(c_warning(f"\n{remaining_rate_limited} posts still rate-limited (will retry next run)"))
 
-    print("Script completed. All cache updates saved.")
+    print(c_success("\n" + "="*60))
+    print(c_success("  Complete! All progress saved."))
+    print(c_success("="*60))
 
 
 if __name__ == "__main__":
