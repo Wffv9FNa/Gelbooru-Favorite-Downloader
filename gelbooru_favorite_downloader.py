@@ -140,18 +140,22 @@ def log_message(message, log_file="log.txt"):
             file.write(message + "\\n")
 
 
-def countdown_sleep(seconds, reason="Waiting"):
+def countdown_sleep(seconds, reason="Waiting", show_done=True):
     """Sleep with a visible countdown timer so users know the script is still working."""
     total = int(seconds)
-    for remaining in range(total, 0, -1):
-        print(f"\r{reason}: {remaining}s remaining...  ", end="", flush=True)
-        time.sleep(1)
-    # Sleep any fractional remainder
-    remainder = seconds - total
+    if total >= 1:
+        for remaining in range(total, 0, -1):
+            print(f"\r{reason}: {remaining}s remaining...  ", end="", flush=True)
+            time.sleep(1)
+        # Clear the countdown line
+        if show_done:
+            print(f"\r{reason}: Done.{' ' * 20}")
+        else:
+            print(f"\r{' ' * 60}\r", end="", flush=True)
+    # Sleep any fractional remainder (or full time if < 1 second)
+    remainder = seconds - total if total >= 1 else seconds
     if remainder > 0:
         time.sleep(remainder)
-    # Clear the countdown line
-    print(f"\r{reason}: Done.{' ' * 20}", flush=True)
 
 
 # Login function
@@ -189,26 +193,20 @@ def get_favorite_post_ids(session, pid):
 
 def get_post_details(post_id):
     # Load posts cache
-    print(f"[{post_id}] Starting...", flush=True)
     posts_cache = load_posts_cache()
 
     # Check if the post is in the cache
     if post_id in posts_cache:
-        log_message(f"Post {post_id:<8} is already in the cache. Skipping API request.")
         return "SKIP"
 
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
     base_delay = 5  # Increased base delay for rate limiting
-    print(f"[{post_id}] Loading failed cache...", flush=True)
     failed_posts_cache = load_failed_posts_cache()
-    print(f"[{post_id}] Failed cache loaded", flush=True)
 
     for i in range(max_retries):
         try:
-            print(f"[{post_id}] Making request (attempt {i+1})...", flush=True)
             response = requests.get(url, timeout=30)
-            print(f"[{post_id}] Got response: {response.status_code}", flush=True)
             if response.status_code == 429:
                 handle_rate_limit_response()
                 add_rate_limited_post(post_id)  # Track rate-limited post
@@ -375,6 +373,7 @@ def batch_process_posts(post_ids, session):
 
         posts_to_process = []
         completed_count = 0
+        cached_count = 0
 
         for future in as_completed(future_to_post_id):
             post_id = future_to_post_id[future]
@@ -383,18 +382,26 @@ def batch_process_posts(post_ids, session):
                 post_details = future.result()
                 if post_details and post_details != "SKIP" and post_details[0]:
                     posts_to_process.append(post_details[0])
-                    print(f"\rFetched post details: {completed_count}/{total_posts} (got: {len(posts_to_process)})  ", end="", flush=True)
                 elif post_details == "SKIP":
-                    print(f"\rFetched post details: {completed_count}/{total_posts} (cached)  ", end="", flush=True)
+                    cached_count += 1
                 else:
                     failed_count += 1
-                    print(f"\rFetched post details: {completed_count}/{total_posts} (failed: {failed_count})  ", end="", flush=True)
             except Exception as e:
                 if "Too Many Requests" in str(e):
                     rate_limited_count += 1
                 else:
                     failed_count += 1
-                log_message(f"\nError fetching details for post {post_id:<8}: {str(e)}")
+
+            # Update progress bar
+            progress = int((completed_count / total_posts) * 20)
+            bar = "=" * progress + "-" * (20 - progress)
+            status_parts = [f"new: {len(posts_to_process)}"]
+            if cached_count > 0:
+                status_parts.append(f"cached: {cached_count}")
+            if failed_count > 0:
+                status_parts.append(f"failed: {failed_count}")
+            status = ", ".join(status_parts)
+            print(f"\r  [{bar}] {completed_count}/{total_posts} ({status})  ", end="", flush=True)
 
         print()  # New line after progress
 
@@ -441,13 +448,13 @@ def batch_fetch_tag_details(tags):
         return
 
     # Process tags in batches to avoid overwhelming the API
-    total_batches = (len(tags_to_fetch) + TAG_BATCH_SIZE - 1) // TAG_BATCH_SIZE
-    print(f"Processing {len(tags_to_fetch)} new tags in {total_batches} batches...")
+    total_tags = len(tags_to_fetch)
+    total_batches = (total_tags + TAG_BATCH_SIZE - 1) // TAG_BATCH_SIZE
+    print(f"Fetching {total_tags} new tag details...")
+    tags_completed = 0
 
-    for i in range(0, len(tags_to_fetch), TAG_BATCH_SIZE):
+    for i in range(0, total_tags, TAG_BATCH_SIZE):
         batch = tags_to_fetch[i : i + TAG_BATCH_SIZE]
-        current_batch = (i // TAG_BATCH_SIZE) + 1
-        print(f"Processing tag batch {current_batch}/{total_batches}...")
 
         with ThreadPoolExecutor(max_workers=min(len(batch), MAX_WORKERS)) as executor:
             future_to_tag = {
@@ -456,16 +463,24 @@ def batch_fetch_tag_details(tags):
 
             for future in as_completed(future_to_tag):
                 tag = future_to_tag[future]
+                tags_completed += 1
                 try:
                     tag_details = future.result()
                     if tag_details:
                         with cache_update_lock:
                             pending_tag_cache[tag] = tag_details
                 except Exception as e:
-                    log_message(f"Error fetching tag details for {tag}: {str(e)}")
+                    pass  # Silently skip tag errors
+
+                # Update progress bar
+                progress = int((tags_completed / total_tags) * 20)
+                bar = "=" * progress + "-" * (20 - progress)
+                print(f"\r  [{bar}] {tags_completed}/{total_tags} tags  ", end="", flush=True)
 
         # Small delay between batches to respect rate limits
-        time.sleep(0.5)  # Increased delay between batches
+        time.sleep(0.5)
+
+    print()  # New line after progress
 
 
 def get_tag_details_single(tag):
@@ -508,7 +523,6 @@ def get_tag_details_single(tag):
 
             if i < max_retries - 1:
                 delay = base_delay * (2**i)
-                print(f"Tag '{tag}' retry in {delay}s...", flush=True)
                 time.sleep(delay)
             else:
                 return None
@@ -884,8 +898,9 @@ def rate_limit_api_call():
 
     # Sleep OUTSIDE the lock so other threads aren't blocked
     if sleep_time > 0:
-        if sleep_time >= 1:
-            countdown_sleep(sleep_time, "API rate limit wait")
+        if sleep_time >= 2:
+            # Only show countdown for longer waits (2+ seconds)
+            countdown_sleep(sleep_time, "Rate limiting", show_done=False)
         else:
             time.sleep(sleep_time)
 
@@ -906,9 +921,7 @@ def handle_rate_limit_response():
                 1, current_max_workers - 1
             )  # Reduce workers but keep at least 1
 
-        log_message(
-            f"Rate limit hit - Increasing delay to {adaptive_delay:.2f}s, reducing workers to {current_max_workers}"
-        )
+        print(f"\n! Rate limited - backing off ({adaptive_delay:.1f}s delay)", flush=True)
 
         # Force a longer pause after rate limit
         sleep_time = adaptive_delay * 2
@@ -924,12 +937,7 @@ def reset_adaptive_delay():
         successful_requests += 1
 
         if successful_requests >= SUCCESS_THRESHOLD and adaptive_delay > MIN_DELAY:
-            old_delay = adaptive_delay
             adaptive_delay = max(adaptive_delay * DELAY_DECREASE_FACTOR, MIN_DELAY)
-            if old_delay != adaptive_delay:
-                log_message(
-                    f"Reducing delay to {adaptive_delay:.2f}s after {successful_requests} successful requests"
-                )
             successful_requests = 0  # Reset counter after adjustment
 
 
