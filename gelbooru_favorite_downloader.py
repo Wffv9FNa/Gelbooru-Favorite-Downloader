@@ -287,7 +287,7 @@ def get_post_details(post_id):
                     f"Failed to get post {post_id:<8} after {max_retries} attempts: {str(e)}"
                 )
                 # Save the post ID to the cache when it exceeds max retries
-                failed_posts_cache[post_id] = True
+                failed_posts_cache[str(post_id)] = {"error": str(e)[:100], "type": "api"}
                 save_failed_posts_cache(failed_posts_cache)
                 remove_rate_limited_post(
                     post_id
@@ -623,6 +623,10 @@ def process_post_optimized(post):
                 pending_posts_cache[post_id] = True
         except Exception as e:
             print(f"  {c_error('x')} {c_error('Failed:')} {file_name[:30]} - {str(e)[:30]}")
+            # Track download failures so they can be retried later
+            failed_cache = load_failed_posts_cache()
+            failed_cache[str(post_id)] = {"error": str(e)[:100], "type": "download"}
+            save_failed_posts_cache(failed_cache)
     else:
         # File already exists, safe to cache
         with cache_update_lock:
@@ -999,21 +1003,133 @@ def signal_handler(sig, frame):
     os._exit(0)
 
 
+def retry_failed_posts(session):
+    """Retry downloading posts that previously failed."""
+    failed_cache = load_failed_posts_cache()
+
+    if not failed_cache:
+        print(c_info("No failed posts to retry."))
+        return
+
+    failed_post_ids = list(failed_cache.keys())
+    print(c_header(f"\n{'='*60}"))
+    print(c_header(f"  Retrying {len(failed_post_ids)} previously failed posts"))
+    print(c_header(f"{'='*60}"))
+
+    success_count = 0
+    still_failed = 0
+
+    for i, post_id in enumerate(failed_post_ids):
+        progress = int(((i + 1) / len(failed_post_ids)) * 20)
+        bar_done = Fore.CYAN + "=" * progress
+        bar_remaining = Fore.WHITE + "-" * (20 - progress)
+        bar = bar_done + bar_remaining + Style.RESET_ALL
+        print(f"\r  [{bar}] {i + 1}/{len(failed_post_ids)} - Post {post_id}  ", end="", flush=True)
+
+        # Try to get post details
+        rate_limit_api_call()
+        post_details = get_post_details(post_id)
+
+        if post_details and post_details != "SKIP" and post_details[0]:
+            post = post_details[0]
+
+            # Get tags for this post
+            character_tags = get_character_tags(post["tags"])
+            copyright_tag = get_copyright_tag(post["tags"])
+            sensitivity = get_sensitivity(post)
+
+            # Try to download
+            if download_and_save_image(post, character_tags, sensitivity, copyright_tag):
+                # Success! Remove from failed cache
+                del failed_cache[post_id]
+                save_failed_posts_cache(failed_cache)
+
+                # Add to posts cache
+                posts_cache = load_posts_cache()
+                posts_cache[post_id] = True
+                save_posts_cache(posts_cache)
+
+                success_count += 1
+                print(f"\r  {c_success('+')} Post {post_id} - recovered successfully{' '*20}")
+            else:
+                still_failed += 1
+        elif post_details == "SKIP":
+            # Already in cache, remove from failed
+            del failed_cache[post_id]
+            save_failed_posts_cache(failed_cache)
+            success_count += 1
+            print(f"\r  {c_dim('-')} Post {post_id} - already cached{' '*20}")
+        else:
+            still_failed += 1
+
+    print()  # New line after progress
+
+    if success_count > 0:
+        print(c_success(f"\nRecovered {success_count} posts"))
+    if still_failed > 0:
+        print(c_warning(f"{still_failed} posts still failing"))
+
+    print(c_success("\n" + "="*60))
+    print(c_success("  Retry complete!"))
+    print(c_success("="*60))
+
+
 # Main function
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Download favourite images from Gelbooru"
+    )
     parser.add_argument("-logtofile", help="log output to file", action="store_true")
+    parser.add_argument(
+        "-r", "--retry-failed",
+        help="retry previously failed posts instead of normal operation",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--list-failed",
+        help="list all failed posts without retrying",
+        action="store_true"
+    )
     args = parser.parse_args()
 
     global log_to_file, rate_limited_posts
     log_to_file = args.logtofile
 
+    # Handle --list-failed
+    if args.list_failed:
+        failed_cache = load_failed_posts_cache()
+        rate_limited = load_rate_limited_posts()
+
+        print(c_header("\nFailed Posts Status"))
+        print(c_header("="*40))
+
+        if failed_cache:
+            print(c_error(f"\nFailed posts ({len(failed_cache)}):"))
+            for post_id in sorted(failed_cache.keys()):
+                error_info = failed_cache[post_id]
+                if isinstance(error_info, dict):
+                    error_type = error_info.get("type", "unknown")
+                    error_msg = error_info.get("error", "")[:50]
+                    print(f"  - {post_id} [{error_type}] {c_dim(error_msg)}")
+                else:
+                    print(f"  - {post_id}")
+        else:
+            print(c_dim("\nNo failed posts."))
+
+        if rate_limited:
+            print(c_warning(f"\nRate-limited ({len(rate_limited)} posts):"))
+            for post_id in sorted(rate_limited):
+                print(f"  - {post_id}")
+        else:
+            print(c_dim("\nNo rate-limited posts."))
+
+        print()
+        return
+
     # Load any previously rate-limited posts
     rate_limited_posts = load_rate_limited_posts()
     if rate_limited_posts:
-        log_message(
-            f"Found {len(rate_limited_posts)} previously rate-limited posts to retry"
-        )
+        print(c_warning(f"Found {len(rate_limited_posts)} previously rate-limited posts to retry"))
 
     # Register signal handler for graceful exit
     signal.signal(signal.SIGINT, signal_handler)
@@ -1022,6 +1138,11 @@ def main():
     session = login()
     if session is None:
         print(c_error("Failed to log in. Exiting."))
+        return
+
+    # Handle --retry-failed mode
+    if args.retry_failed:
+        retry_failed_posts(session)
         return
 
     # Load posts cache
