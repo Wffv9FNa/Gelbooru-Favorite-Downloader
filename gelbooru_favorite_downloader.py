@@ -7,39 +7,111 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote
+
 import requests
+import yaml
 from bs4 import BeautifulSoup
 
-API_KEY = "your-api-key-here"
-USER_ID = "your-user-id-here"
-USERNAME = "your-username-here"
-PASSWORD = "your-password-here"
-POSTS_PER_PAGE = 50
-MAX_CONSECUTIVE_EMPTY_PAGES = 10
-CACHE_FILE = "tag_cache.json"
-POSTS_CACHE_FILE = "posts_cache.json"
-FAILED_POSTS_CACHE_FILE = "failed_posts_cache.json"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# =============================================================================
+# Configuration Loading
+# =============================================================================
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.yaml")
 
-# Threading and performance settings - Adjust these based on your system and rate limits
-MAX_WORKERS = 4  # Maximum parallel requests
-DOWNLOAD_WORKERS = 3  # Reduced concurrent downloads
-TAG_BATCH_SIZE = 20  # Batch size for tag fetching
-ENABLE_PERFORMANCE_MODE = True  # Set to False to use original sequential processing
+
+def load_config():
+    """Load configuration from config.yaml file."""
+    if not os.path.exists(CONFIG_FILE):
+        print(f"Error: Configuration file not found: {CONFIG_FILE}")
+        print("Please create a config.yaml file with your settings.")
+        print("See config.yaml.example for reference.")
+        sys.exit(1)
+
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        print(f"Error: Invalid YAML in configuration file: {e}")
+        sys.exit(1)
+
+    # Validate required sections
+    required_sections = ["api", "settings", "cache", "threading", "rate_limiting"]
+    for section in required_sections:
+        if section not in config:
+            print(f"Error: Missing required section '{section}' in config.yaml")
+            sys.exit(1)
+
+    return config
+
+
+def validate_config(config):
+    """Validate configuration values and return processed config."""
+    errors = []
+
+    # Validate API credentials
+    api = config.get("api", {})
+    if not api.get("api_key") or api.get("api_key") == "your-api-key-here":
+        errors.append("API key not configured in config.yaml")
+    if not api.get("user_id") or api.get("user_id") == "your-user-id-here":
+        errors.append("User ID not configured in config.yaml")
+    if not api.get("username") or api.get("username") == "your-username-here":
+        errors.append("Username not configured in config.yaml")
+    if not api.get("password") or api.get("password") == "your-password-here":
+        errors.append("Password not configured in config.yaml")
+
+    if errors:
+        print("Configuration errors:")
+        for error in errors:
+            print(f"  - {error}")
+        sys.exit(1)
+
+    return config
+
+
+# Load configuration
+config = load_config()
+config = validate_config(config)
+
+# API Credentials
+API_KEY = config["api"]["api_key"]
+USER_ID = config["api"]["user_id"]
+USERNAME = config["api"]["username"]
+PASSWORD = config["api"]["password"]
+
+# General Settings
+POSTS_PER_PAGE = config["settings"].get("posts_per_page", 50)
+MAX_CONSECUTIVE_EMPTY_PAGES = config["settings"].get("max_consecutive_empty_pages", 10)
+_base_dir = config["settings"].get("base_dir", "")
+BASE_DIR = _base_dir if _base_dir else SCRIPT_DIR
+
+# Cache Files
+CACHE_FILE = config["cache"].get("tag_cache_file", "tag_cache.json")
+POSTS_CACHE_FILE = config["cache"].get("posts_cache_file", "posts_cache.json")
+FAILED_POSTS_CACHE_FILE = config["cache"].get(
+    "failed_posts_cache_file", "failed_posts_cache.json"
+)
+RATE_LIMITED_POSTS_FILE = config["cache"].get(
+    "rate_limited_posts_file", "rate_limited_posts.json"
+)
+
+# Threading and Performance Settings
+MAX_WORKERS = config["threading"].get("max_workers", 4)
+DOWNLOAD_WORKERS = config["threading"].get("download_workers", 3)
+TAG_BATCH_SIZE = config["threading"].get("tag_batch_size", 20)
+ENABLE_PERFORMANCE_MODE = config["threading"].get("performance_mode", True)
 
 file_lock = threading.Lock()
 
-# Rate limiting settings
-MIN_DELAY = 0.25  # Minimum delay between requests (4 req/sec max)
-MAX_DELAY = 5.0  # Maximum delay between requests
-DELAY_INCREASE_FACTOR = 1.5  # Increase factor on rate limit
-DELAY_DECREASE_FACTOR = 0.95  # Slower decrease rate
-SUCCESS_THRESHOLD = 15  # More successful requests needed before reducing delay
+# Rate Limiting Settings
+MIN_DELAY = config["rate_limiting"].get("min_delay", 0.25)
+MAX_DELAY = config["rate_limiting"].get("max_delay", 5.0)
+DELAY_INCREASE_FACTOR = config["rate_limiting"].get("delay_increase_factor", 1.5)
+DELAY_DECREASE_FACTOR = config["rate_limiting"].get("delay_decrease_factor", 0.95)
+SUCCESS_THRESHOLD = config["rate_limiting"].get("success_threshold", 15)
 
 # Dynamic concurrency control
 current_max_workers = MAX_WORKERS  # This will be reduced when we hit rate limits
 workers_lock = threading.Lock()
-RATE_LIMITED_POSTS_FILE = "rate_limited_posts.json"  # File to track rate-limited posts
 
 last_api_call_time = 0
 api_call_lock = threading.Lock()

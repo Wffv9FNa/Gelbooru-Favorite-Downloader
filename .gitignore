@@ -1,2 +1,5 @@
 .cursor/
 memory-bank/
+config.yaml
+__pycache__/
+.pytest_cache/

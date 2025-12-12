@@ -1,0 +1,77 @@
+# Gelbooru Favourite Downloader Configuration
+# Copy this file to config.yaml and fill in your credentials
+#
+# To obtain your API credentials:
+# 1. Log in to Gelbooru
+# 2. Go to My Account -> Options -> API Access Credentials
+# 3. Copy your API Key and User ID
+
+# =============================================================================
+# API Credentials
+# =============================================================================
+# Your Gelbooru API credentials - required for accessing the API
+api:
+  api_key: "your-api-key-here"
+  user_id: "your-user-id-here"
+  username: "your-username-here"
+  password: "your-password-here"
+
+# =============================================================================
+# General Settings
+# =============================================================================
+settings:
+  # Number of posts fetched per page from favourites
+  posts_per_page: 50
+
+  # Stop after this many consecutive pages with no new downloads
+  max_consecutive_empty_pages: 10
+
+  # Base directory for downloaded images (leave empty to use script directory)
+  base_dir: ""
+
+# =============================================================================
+# Cache Files
+# =============================================================================
+# File paths for various caches (relative to script directory)
+cache:
+  tag_cache_file: "tag_cache.json"
+  posts_cache_file: "posts_cache.json"
+  failed_posts_cache_file: "failed_posts_cache.json"
+  rate_limited_posts_file: "rate_limited_posts.json"
+
+# =============================================================================
+# Threading & Performance
+# =============================================================================
+threading:
+  # Maximum parallel requests for API calls
+  max_workers: 4
+
+  # Concurrent download threads for images
+  download_workers: 3
+
+  # Number of tags to process per batch
+  tag_batch_size: 20
+
+  # Enable parallel processing (set to false for sequential processing)
+  performance_mode: true
+
+# =============================================================================
+# Rate Limiting
+# =============================================================================
+# Adaptive rate limiting to avoid hitting API limits
+rate_limiting:
+  # Minimum delay between API requests (seconds)
+  min_delay: 0.25
+
+  # Maximum delay between API requests (seconds)
+  max_delay: 5.0
+
+  # Multiply delay by this factor when rate limited
+  delay_increase_factor: 1.5
+
+  # Multiply delay by this factor after successful requests
+  delay_decrease_factor: 0.95
+
+  # Number of successful requests before reducing delay
+  success_threshold: 15
+
