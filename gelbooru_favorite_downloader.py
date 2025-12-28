@@ -296,12 +296,6 @@ def get_post_details(post_id):
 
 
 # Functions related to downloading and saving images
-def create_directories():
-    sensitivities = ["General", "Sensitive", "Questionable", "Explicit"]
-    for sensitivity in sensitivities:
-        os.makedirs(f"Multiple/{sensitivity}", exist_ok=True)
-
-
 # Global session for connection pooling
 download_session = requests.Session()
 download_session.headers.update(
