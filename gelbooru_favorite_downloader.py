@@ -141,7 +141,6 @@ RATE_LIMITED_POSTS_FILE = config["cache"].get(
 MAX_WORKERS = config["threading"].get("max_workers", 4)
 DOWNLOAD_WORKERS = config["threading"].get("download_workers", 3)
 TAG_BATCH_SIZE = config["threading"].get("tag_batch_size", 20)
-ENABLE_PERFORMANCE_MODE = config["threading"].get("performance_mode", True)
 
 file_lock = threading.Lock()
 
@@ -168,13 +167,16 @@ pending_posts_cache = {}
 pending_tag_cache = {}
 cache_update_lock = threading.Lock()
 
+# Logging settings
+log_to_file = False  # Will be set to True if -logtofile flag is used
+
 
 # Logging functions
 def log_message(message, log_file="log.txt"):
     print(message)
     if log_to_file:
         with open(log_file, "a") as file:
-            file.write(message + "\\n")
+            file.write(message + "\n")
 
 
 def countdown_sleep(seconds, reason="Waiting", show_done=True):
@@ -562,8 +564,6 @@ def get_tag_details_single(tag):
                 time.sleep(delay)
             else:
                 return None
-        else:
-            break
 
     return None
 
@@ -661,91 +661,6 @@ def get_copyright_tag_optimized(tags):
         if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
             return tag_details["name"]
 
-    return None
-
-
-# Functions related to tag details
-def get_tag_details(tag):
-    # Load cache
-    cache = load_cache()
-
-    # Check if tag is in cache
-    if tag in cache:
-        return cache[tag]
-
-    # Rate limit API calls
-    rate_limit_api_call()
-
-    tag_details = None  # assign a default value
-
-    # Fetch tag details from API
-    modified_tag = (
-        tag.replace("&#039;", "'")
-        .replace("&gt;", ">")
-        .replace("&lt;", "<")
-        .replace("&quot;", '"')
-        .replace("&amp;", "&")
-    )
-    encoded_tag = quote(modified_tag)
-    url = f"https://gelbooru.com/index.php?page=dapi&s=tag&q=index&json=1&name={encoded_tag}&api_key={API_KEY}&user_id={USER_ID}"
-    max_retries = 5
-    base_delay = 5  # Increased base delay for rate limiting
-
-    for i in range(max_retries):
-        try:
-            response = requests.get(url, timeout=30)
-            response.raise_for_status()
-
-            if response.status_code == 429:
-                handle_rate_limit_response()
-                raise requests.exceptions.RequestException("Too Many Requests")
-
-            data = json.loads(response.text)
-            if data:
-                try:
-                    tag_details = data["tag"][0]
-                    reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
-                except KeyError:
-                    reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
-                    return None
-            else:
-                reset_adaptive_delay()  # Success, so we can reduce delay if it was increased
-                return None
-
-        except requests.exceptions.RequestException as e:
-            if "Too Many Requests" in str(e):
-                handle_rate_limit_response()
-
-            if i < max_retries - 1:
-                delay = base_delay * (2**i)  # Exponential backoff
-                countdown_sleep(delay, f"Retry backoff for tag '{tag}'")
-            else:
-                return None
-        else:
-            break
-
-    # Save tag details to cache
-    if tag_details is not None:
-        cache[tag] = tag_details
-        save_cache(cache)
-
-    return tag_details
-
-
-def get_character_tags(tags):
-    character_tags = []
-    for tag in tags.split():
-        tag_details = get_tag_details(tag)
-        if tag_details and "type" in tag_details and int(tag_details["type"]) == 4:
-            character_tags.append(tag_details["name"])
-    return character_tags
-
-
-def get_copyright_tag(tags):
-    for tag in tags.split():
-        tag_details = get_tag_details(tag)
-        if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
-            return tag_details["name"]
     return None
 
 
@@ -860,60 +775,6 @@ def get_folder_name(character_tags, copyright_tag):
             return ("Multiple", None)
 
 
-def process_post(post):
-    post_id = post["id"]
-    log_message(f"Processing post {post_id:<8}")
-
-    # Load posts cache
-    posts_cache = load_posts_cache()
-
-    # Check if the post has been processed already
-    if post_id in posts_cache:
-        log_message(f"Skipping post {post_id:<8} as it has already been processed")
-        return False  # Indicate no download occurred
-
-    character_tags = get_character_tags(post["tags"])
-    copyright_tag = get_copyright_tag(post["tags"])
-    log_message(f"Character tags: {character_tags}")
-
-    # Check if the image file exists on disk before calling download_and_save_image
-    file_url = post["file_url"]
-    file_name = file_url.split("/")[-1]
-    sensitivity = get_sensitivity(post)
-
-    base_folder_name, specific_folder_name = get_folder_name(
-        character_tags, copyright_tag
-    )
-    base_folder_name = sanitize_for_path(
-        base_folder_name
-    )  # Sanitize the base folder name
-
-    # Construct the path based on whether there is a specific folder name
-    if specific_folder_name:
-        path = os.path.join(
-            BASE_DIR, base_folder_name, specific_folder_name, sensitivity
-        )
-    else:
-        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
-
-    file_path = os.path.join(path, file_name)
-
-    if os.path.exists(file_path):
-        log_message(
-            f"Skipping download of image {file_name} for post {post['id']:<8} because it already exists"
-        )
-        posts_cache[post_id] = True
-        save_posts_cache(posts_cache)
-        return False  # Indicate no download occurred
-    else:
-        # Only update cache if download succeeds
-        if download_and_save_image(post, character_tags, sensitivity, copyright_tag):
-            posts_cache[post_id] = True
-            save_posts_cache(posts_cache)
-            return True  # Indicate download occurred
-        return False  # Download failed
-
-
 def rate_limit_api_call():
     """Ensure we don't make API calls too frequently"""
     global last_api_call_time, adaptive_delay
@@ -1010,50 +871,57 @@ def retry_failed_posts(session):
     print(c_header(f"  Retrying {len(failed_post_ids)} previously failed posts"))
     print(c_header(f"{'='*60}"))
 
+    # First, fetch all post details to gather tags
+    print(c_info("Fetching post details..."))
+    posts_to_retry = []
+    for post_id in failed_post_ids:
+        rate_limit_api_call()
+        post_details = get_post_details(post_id)
+        if post_details and post_details != "SKIP" and post_details[0]:
+            posts_to_retry.append((post_id, post_details[0]))
+
+    # Batch fetch all tags
+    if posts_to_retry:
+        all_tags = set()
+        for _, post in posts_to_retry:
+            all_tags.update(post["tags"].split())
+        print(c_info(f"Fetching {len(all_tags)} unique tags..."))
+        batch_fetch_tag_details(list(all_tags))
+
     success_count = 0
     still_failed = 0
 
-    for i, post_id in enumerate(failed_post_ids):
-        progress = int(((i + 1) / len(failed_post_ids)) * 20)
+    for i, (post_id, post) in enumerate(posts_to_retry):
+        progress = int(((i + 1) / len(posts_to_retry)) * 20)
         bar_done = Fore.CYAN + "=" * progress
         bar_remaining = Fore.WHITE + "-" * (20 - progress)
         bar = bar_done + bar_remaining + Style.RESET_ALL
-        print(f"\r  [{bar}] {i + 1}/{len(failed_post_ids)} - Post {post_id}  ", end="", flush=True)
+        print(f"\r  [{bar}] {i + 1}/{len(posts_to_retry)} - Post {post_id}  ", end="", flush=True)
 
-        # Try to get post details
-        rate_limit_api_call()
-        post_details = get_post_details(post_id)
+        # Get tags for this post using optimized functions
+        character_tags = get_character_tags_optimized(post["tags"])
+        copyright_tag = get_copyright_tag_optimized(post["tags"])
+        sensitivity = get_sensitivity(post)
 
-        if post_details and post_details != "SKIP" and post_details[0]:
-            post = post_details[0]
-
-            # Get tags for this post
-            character_tags = get_character_tags(post["tags"])
-            copyright_tag = get_copyright_tag(post["tags"])
-            sensitivity = get_sensitivity(post)
-
-            # Try to download
-            if download_and_save_image(post, character_tags, sensitivity, copyright_tag):
-                # Success! Remove from failed cache
-                del failed_cache[post_id]
-                save_failed_posts_cache(failed_cache)
-
-                # Add to posts cache
-                posts_cache = load_posts_cache()
-                posts_cache[post_id] = True
-                save_posts_cache(posts_cache)
-
-                success_count += 1
-                print(f"\r  {c_success('+')} Post {post_id} - recovered successfully{' '*20}")
-            else:
-                still_failed += 1
-        elif post_details == "SKIP":
-            # Already in cache, remove from failed
+        # Try to download
+        if download_and_save_image(post, character_tags, sensitivity, copyright_tag):
+            # Success! Remove from failed cache
             del failed_cache[post_id]
             save_failed_posts_cache(failed_cache)
+
+            # Add to posts cache
+            posts_cache = load_posts_cache()
+            posts_cache[post_id] = True
+            save_posts_cache(posts_cache)
+
             success_count += 1
-            print(f"\r  {c_dim('-')} Post {post_id} - already cached{' '*20}")
+            print(f"\r  {c_success('+')} Post {post_id} - recovered successfully{' '*20}")
         else:
+            still_failed += 1
+
+    # Handle posts that were skipped or couldn't be fetched
+    for post_id in failed_post_ids:
+        if not any(pid == post_id for pid, _ in posts_to_retry):
             still_failed += 1
 
     print()  # New line after progress
@@ -1158,34 +1026,17 @@ def main():
         print(c_header(f"  Page {page_num} - {len(post_ids)} favourite posts"))
         print(c_header(f"{'='*60}"))
 
-        if ENABLE_PERFORMANCE_MODE:
-            # Use optimised batch processing
-            start_time = time.time()
-            downloaded_count = batch_process_posts(post_ids, session)
-            end_time = time.time()
+        # Use optimised batch processing
+        start_time = time.time()
+        downloaded_count = batch_process_posts(post_ids, session)
+        end_time = time.time()
 
-            elapsed = end_time - start_time
-            if downloaded_count > 0:
-                print(c_success(f"Downloaded {downloaded_count} new images") + c_dim(f" in {elapsed:.1f}s"))
-            else:
-                print(c_dim(f"No new images (all cached) - {elapsed:.1f}s"))
-            downloaded_images = downloaded_count > 0
+        elapsed = end_time - start_time
+        if downloaded_count > 0:
+            print(c_success(f"Downloaded {downloaded_count} new images") + c_dim(f" in {elapsed:.1f}s"))
         else:
-            # Original sequential processing (fallback)
-            downloaded_images = False
-            for post_id in post_ids:
-                rate_limit_api_call()
-                post_details = get_post_details(post_id)
-                if (
-                    post_details == "SKIP"
-                    or post_details is None
-                    or not post_details
-                    or post_details[0] is None
-                ):
-                    continue
-
-                if process_post(post_details[0]):
-                    downloaded_images = True
+            print(c_dim(f"No new images (all cached) - {elapsed:.1f}s"))
+        downloaded_images = downloaded_count > 0
 
         if not downloaded_images:
             consecutive_empty_pages += 1
