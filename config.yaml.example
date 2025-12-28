@@ -52,9 +52,6 @@ threading:
   # Number of tags to process per batch
   tag_batch_size: 20
 
-  # Enable parallel processing (set to false for sequential processing)
-  performance_mode: true
-
 # =============================================================================
 # Rate Limiting
 # =============================================================================

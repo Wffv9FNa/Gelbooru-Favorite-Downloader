@@ -457,7 +457,7 @@ def batch_process_posts(post_ids, session):
     # Process posts with image downloads in parallel
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
         futures = [
-            executor.submit(process_post_optimized, post) for post in posts_to_process
+            executor.submit(process_post, post) for post in posts_to_process
         ]
 
         for future in as_completed(futures):
@@ -568,8 +568,8 @@ def get_tag_details_single(tag):
     return None
 
 
-def process_post_optimized(post):
-    """Optimized post processing with buffered cache updates"""
+def process_post(post):
+    """Process post with buffered cache updates"""
     post_id = post["id"]
 
     # Safety check in case this function is called directly
@@ -585,8 +585,8 @@ def process_post_optimized(post):
     file_name = file_url.split("/")[-1]
     sensitivity = get_sensitivity(post)
 
-    character_tags = get_character_tags_optimized(post["tags"])
-    copyright_tag = get_copyright_tag_optimized(post["tags"])
+    character_tags = get_character_tags(post["tags"])
+    copyright_tag = get_copyright_tag(post["tags"])
 
     base_folder_name, specific_folder_name = get_folder_name(
         character_tags, copyright_tag
@@ -629,8 +629,8 @@ def process_post_optimized(post):
     return download_occurred
 
 
-def get_character_tags_optimized(tags):
-    """Optimized character tag retrieval using cached data"""
+def get_character_tags(tags):
+    """Retrieve character tags using cached data"""
     character_tags = []
     cache = load_cache()
 
@@ -647,8 +647,8 @@ def get_character_tags_optimized(tags):
     return character_tags
 
 
-def get_copyright_tag_optimized(tags):
-    """Optimized copyright tag retrieval using cached data"""
+def get_copyright_tag(tags):
+    """Retrieve copyright tag using cached data"""
     cache = load_cache()
 
     for tag in tags.split():
@@ -899,8 +899,8 @@ def retry_failed_posts(session):
         print(f"\r  [{bar}] {i + 1}/{len(posts_to_retry)} - Post {post_id}  ", end="", flush=True)
 
         # Get tags for this post using optimized functions
-        character_tags = get_character_tags_optimized(post["tags"])
-        copyright_tag = get_copyright_tag_optimized(post["tags"])
+        character_tags = get_character_tags(post["tags"])
+        copyright_tag = get_copyright_tag(post["tags"])
         sensitivity = get_sensitivity(post)
 
         # Try to download
