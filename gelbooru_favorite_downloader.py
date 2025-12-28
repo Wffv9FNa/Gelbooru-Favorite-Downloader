@@ -898,7 +898,7 @@ def retry_failed_posts(session):
         bar = bar_done + bar_remaining + Style.RESET_ALL
         print(f"\r  [{bar}] {i + 1}/{len(posts_to_retry)} - Post {post_id}  ", end="", flush=True)
 
-        # Get tags for this post using optimized functions
+        # Get tags for this post
         character_tags = get_character_tags(post["tags"])
         copyright_tag = get_copyright_tag(post["tags"])
         sensitivity = get_sensitivity(post)
@@ -1026,7 +1026,7 @@ def main():
         print(c_header(f"  Page {page_num} - {len(post_ids)} favourite posts"))
         print(c_header(f"{'='*60}"))
 
-        # Use optimised batch processing
+        # Process posts in batches
         start_time = time.time()
         downloaded_count = batch_process_posts(post_ids, session)
         end_time = time.time()
