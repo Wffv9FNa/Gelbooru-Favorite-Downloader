@@ -564,9 +564,23 @@ def flush_cache_buffers():
             pending_tag_cache.clear()
 
 
+# Named so every post is accounted for in the per-page line, not just downloads.
+POST_DOWNLOADED = "downloaded"
+POST_ON_DISK = "on_disk"
+POST_ALREADY_CACHED = "already_cached"
+POST_DOWNLOAD_FAILED = "download_failed"
+
+POST_OUTCOMES = (
+    POST_DOWNLOADED,
+    POST_ON_DISK,
+    POST_ALREADY_CACHED,
+    POST_DOWNLOAD_FAILED,
+)
+
+
 def batch_process_posts(post_ids):
-    """Process multiple posts in parallel"""
-    downloaded_count = 0
+    """Process multiple posts in parallel, returning a count per POST_OUTCOMES key"""
+    download_results = dict.fromkeys(POST_OUTCOMES, 0)
     failed_count = 0
 
     # First, fetch all post details in parallel with dynamic worker count
@@ -624,7 +638,7 @@ def batch_process_posts(post_ids):
         print()  # New line after progress
 
     if not posts_to_process:
-        return 0
+        return download_results
 
     # Collect all unique tags from all posts for batch processing
     print(c_info("Processing tags..."))
@@ -646,15 +660,34 @@ def batch_process_posts(post_ids):
 
         for future in as_completed(futures):
             try:
-                if future.result():  # If download occurred
-                    downloaded_count += 1
+                download_results[future.result()] += 1
             except Exception as e:
-                failed_count += 1
+                download_results[POST_DOWNLOAD_FAILED] += 1
                 log_message(f"Error processing post: {e!s}")
 
     # Flush cache updates
     flush_cache_buffers()
-    return downloaded_count
+    return download_results
+
+
+def format_page_summary(download_results, elapsed):
+    """Build the per-page result line, naming every outcome rather than downloads alone"""
+    downloaded_count = download_results[POST_DOWNLOADED]
+
+    extras = []
+    if download_results[POST_ON_DISK] > 0:
+        extras.append(c_dim(f"{download_results[POST_ON_DISK]} already on disk"))
+    if download_results[POST_ALREADY_CACHED] > 0:
+        extras.append(c_dim(f"{download_results[POST_ALREADY_CACHED]} cached mid-run"))
+    if download_results[POST_DOWNLOAD_FAILED] > 0:
+        extras.append(c_error(f"{download_results[POST_DOWNLOAD_FAILED]} failed"))
+    extra_str = (", " + ", ".join(extras)) if extras else ""
+
+    if downloaded_count > 0:
+        return c_success(f"Downloaded {downloaded_count} new images") + extra_str + c_dim(f" in {elapsed:.1f}s")
+    if extras:
+        return c_dim("No new downloads") + extra_str + c_dim(f" - {elapsed:.1f}s")
+    return c_dim(f"No new images (all cached) - {elapsed:.1f}s")
 
 
 def batch_fetch_tag_details(tags):
@@ -763,7 +796,7 @@ def get_tag_details_single(tag):
 
 
 def process_post(post):
-    """Process post with buffered cache updates"""
+    """Process post with buffered cache updates, returning one of POST_OUTCOMES"""
     post_id = post["id"]
 
     # Safety check in case this function is called directly
@@ -772,7 +805,7 @@ def process_post(post):
     with cache_update_lock:
         if post_id in posts_cache or post_id in pending_posts_cache:
             log_message(f"Post {post_id:<8} found in cache during processing, skipping")
-            return False
+            return POST_ALREADY_CACHED
 
     file_url, file_name = resolve_download_url(post)
     sensitivity = get_sensitivity(post)
@@ -784,14 +817,12 @@ def process_post(post):
 
     file_path = os.path.join(path, file_name)
 
-    download_occurred = False
-
     if not os.path.exists(file_path):
         try:
             if not os.path.exists(path):
                 os.makedirs(path)
             download_image(file_url, file_path)
-            download_occurred = True
+            outcome = POST_DOWNLOADED
             # Format download message with colour
             print(f"  {c_success('+')} {c_dim(file_name[:45])} {c_dim('post')} {post_id}")
             # Only add to cache if download succeeded
@@ -799,6 +830,7 @@ def process_post(post):
                 pending_posts_cache[post_id] = True
         except Exception as e:
             print(f"  {c_error('x')} {c_error('Failed:')} {file_name[:30]} - {str(e)[:30]}")
+            outcome = POST_DOWNLOAD_FAILED
             # Track download failures so they can be retried later
             with failed_cache_lock:
                 failed_cache = load_failed_posts_cache()
@@ -806,10 +838,11 @@ def process_post(post):
                 save_failed_posts_cache(failed_cache)
     else:
         # File already exists, safe to cache
+        outcome = POST_ON_DISK
         with cache_update_lock:
             pending_posts_cache[post_id] = True
 
-    return download_occurred
+    return outcome
 
 
 def get_character_tags(tags):
@@ -1301,15 +1334,12 @@ def main():
 
         # Process posts in batches
         start_time = time.time()
-        downloaded_count = batch_process_posts(post_ids)
+        download_results = batch_process_posts(post_ids)
         end_time = time.time()
 
         elapsed = end_time - start_time
-        if downloaded_count > 0:
-            print(c_success(f"Downloaded {downloaded_count} new images") + c_dim(f" in {elapsed:.1f}s"))
-        else:
-            print(c_dim(f"No new images (all cached) - {elapsed:.1f}s"))
-        downloaded_images = downloaded_count > 0
+        print(format_page_summary(download_results, elapsed))
+        downloaded_images = download_results[POST_DOWNLOADED] > 0
 
         if not downloaded_images:
             consecutive_empty_pages += 1
