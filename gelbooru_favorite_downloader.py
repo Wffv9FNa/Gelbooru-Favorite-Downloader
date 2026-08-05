@@ -503,23 +503,25 @@ def sanitize_for_path(name):
     return name
 
 
-def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
-    file_url, file_name = resolve_download_url(post)
-
+def build_destination_dir(character_tags, copyright_tag, sensitivity) -> str:
+    """Return the destination directory for a post. Callers create it themselves."""
     base_folder_name, specific_folder_name = get_folder_name(
         character_tags, copyright_tag
     )
-    base_folder_name = sanitize_for_path(
-        base_folder_name
-    )  # Sanitize the base folder name
+    base_folder_name = sanitize_for_path(base_folder_name)
 
     if specific_folder_name:
         specific_folder_name = sanitize_for_path(specific_folder_name)
-        path = os.path.join(
+        return os.path.join(
             BASE_DIR, base_folder_name, specific_folder_name, sensitivity
         )
-    else:
-        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
+    return os.path.join(BASE_DIR, base_folder_name, sensitivity)
+
+
+def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
+    file_url, file_name = resolve_download_url(post)
+
+    path = build_destination_dir(character_tags, copyright_tag, sensitivity)
 
     if not os.path.exists(path):
         os.makedirs(path)
@@ -776,18 +778,7 @@ def process_post(post):
     character_tags = get_character_tags(post["tags"])
     copyright_tag = get_copyright_tag(post["tags"])
 
-    base_folder_name, specific_folder_name = get_folder_name(
-        character_tags, copyright_tag
-    )
-    base_folder_name = sanitize_for_path(base_folder_name)
-
-    if specific_folder_name:
-        specific_folder_name = sanitize_for_path(specific_folder_name)
-        path = os.path.join(
-            BASE_DIR, base_folder_name, specific_folder_name, sensitivity
-        )
-    else:
-        path = os.path.join(BASE_DIR, base_folder_name, sensitivity)
+    path = build_destination_dir(character_tags, copyright_tag, sensitivity)
 
     file_path = os.path.join(path, file_name)
 
