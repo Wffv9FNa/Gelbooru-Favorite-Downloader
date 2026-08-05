@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import requests
 import yaml
@@ -414,19 +414,73 @@ def get_post_details(post_id):
 # Global session for connection pooling
 download_session = requests.Session()
 download_session.headers.update(
-    {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        # The image host's hotlink protection serves the HTML post page, not the bytes, without this.
+        "Referer": "https://gelbooru.com/",
+    }
 )
 
 
-def download_image(url, file_path):
-    try:
-        response = download_session.get(url, timeout=30)
-        response.raise_for_status()
-    except Exception as e:
-        raise Exception(f"Error downloading image: {str(e)}")
+def resolve_download_url(post) -> tuple[str, str]:
+    """Return (download_url, file_name) for a post. file_url is authoritative
+    unless it is served from a different host than preview_url (videos use a
+    video-cdn host that returns an HTML error page), in which case the real
+    file is reconstructed on the preview host from directory/image."""
+    file_url = post["file_url"]
+    preview_url = post.get("preview_url")
+    directory = post.get("directory")
+    image = post.get("image")
+    if preview_url and directory and image:
+        preview_host = urlparse(preview_url).netloc
+        if preview_host and urlparse(file_url).netloc != preview_host:
+            return f"https://{preview_host}/images/{directory}/{image}", image
+    return file_url, file_url.split("/")[-1]
 
-    with open(file_path, "wb") as f:
-        f.write(response.content)
+
+def is_retryable_download_error(error: Exception) -> bool:
+    """Transport faults and 5xx are worth retrying. A 4xx such as a 404 video-cdn URL is terminal."""
+    if isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    response = getattr(error, "response", None)
+    return response is not None and 500 <= response.status_code < 600
+
+
+def download_image(url, file_path):
+    max_retries = 3
+    base_delay = 2
+
+    for attempt in range(max_retries):
+        rate_limit_api_call("download")
+        try:
+            response = download_session.get(url, timeout=30)
+
+            # Check 429 before raise_for_status so it routes to backoff, not a generic HTTPError.
+            if response.status_code == 429:
+                handle_rate_limit_response()
+                if attempt < max_retries - 1:
+                    with stats_lock:
+                        rate_stats["retries"] += 1
+                    continue
+
+            response.raise_for_status()
+        except Exception as e:
+            if attempt < max_retries - 1 and is_retryable_download_error(e):
+                delay = base_delay * (2**attempt)
+                with stats_lock:
+                    rate_stats["retries"] += 1
+                debug_log(
+                    f"download retry {attempt + 1}/{max_retries} in {delay}s: {str(e)[:60]}"
+                )
+                # Silent sleep, not countdown_sleep: this runs on a worker thread under the progress bar.
+                time.sleep(delay)
+                continue
+            raise Exception(f"Error downloading image: {str(e)}")
+
+        with open(file_path, "wb") as f:
+            f.write(response.content)
+        reset_adaptive_delay()
+        return
 
 
 def sanitize_for_path(name):
@@ -441,8 +495,7 @@ def sanitize_for_path(name):
 
 
 def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
-    file_url = post["file_url"]
-    file_name = file_url.split("/")[-1]
+    file_url, file_name = resolve_download_url(post)
 
     base_folder_name, specific_folder_name = get_folder_name(
         character_tags, copyright_tag
@@ -705,9 +758,7 @@ def process_post(post):
             log_message(f"Post {post_id:<8} found in cache during processing, skipping")
             return False
 
-    # Check if file already exists
-    file_url = post["file_url"]
-    file_name = file_url.split("/")[-1]
+    file_url, file_name = resolve_download_url(post)
     sensitivity = get_sensitivity(post)
 
     character_tags = get_character_tags(post["tags"])
