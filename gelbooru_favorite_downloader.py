@@ -332,7 +332,14 @@ def get_favorite_post_ids(session, pid):
 
 
 def get_post_details(post_id):
-    # Load posts cache
+    """Fetch a post's details from the API.
+
+    Returns the string "SKIP" if the post is already in the posts cache, a
+    single-element list holding the post dict on success, the POST_MISSING
+    sentinel if the API no longer returns the post (deleted or hidden), or None
+    if it could not be fetched after all retries. POST_MISSING and None are kept
+    distinct so a deleted favourite is not counted as a fetch failure.
+    """
     posts_cache = load_posts_cache()
 
     if post_id in posts_cache:
@@ -368,7 +375,8 @@ def get_post_details(post_id):
                 remove_rate_limited_post(
                     post_id
                 )  # Remove from tracking if request completed
-                return None
+                debug_log(f"post {post_id} is no longer returned by the API (deleted or hidden)")
+                return POST_MISSING
 
         except requests.exceptions.RequestException as e:
             if "Too Many Requests" in str(e):
@@ -512,16 +520,20 @@ def batch_process_posts(post_ids, session):
         posts_to_process = []
         completed_count = 0
         cached_count = 0
+        missing_count = 0
 
         for future in as_completed(future_to_post_id):
             post_id = future_to_post_id[future]
             completed_count += 1
             try:
                 post_details = future.result()
-                if post_details and post_details != "SKIP" and post_details[0]:
-                    posts_to_process.append(post_details[0])
+                # POST_MISSING is checked first: it is truthy and not subscriptable.
+                if post_details is POST_MISSING:
+                    missing_count += 1
                 elif post_details == "SKIP":
                     cached_count += 1
+                elif post_details and post_details[0]:
+                    posts_to_process.append(post_details[0])
                 else:
                     failed_count += 1
             except Exception as e:
@@ -536,8 +548,9 @@ def batch_process_posts(post_ids, session):
 
             new_count = c_success(f"new: {len(posts_to_process)}")
             cached_str = c_dim(f"cached: {cached_count}") if cached_count > 0 else ""
+            missing_str = c_warning(f"missing: {missing_count}") if missing_count > 0 else ""
             failed_str = c_error(f"failed: {failed_count}") if failed_count > 0 else ""
-            status_parts = [s for s in [new_count, cached_str, failed_str] if s]
+            status_parts = [s for s in [new_count, cached_str, missing_str, failed_str] if s]
             status = ", ".join(status_parts)
 
             print(f"\r  [{bar}] {completed_count}/{total_posts} ({status})  ", end="", flush=True)
@@ -1056,11 +1069,23 @@ def retry_failed_posts(session):
     # First, fetch all post details to gather tags
     print(c_info("Fetching post details..."))
     posts_to_retry = []
+    stale_post_ids = []  # "SKIP" => already in posts_cache, i.e. recovered in a prior run.
+    missing_post_ids = []
     for post_id in failed_post_ids:
         rate_limit_api_call("detail")
         post_details = get_post_details(post_id)
-        if post_details and post_details != "SKIP" and post_details[0]:
+        if post_details is POST_MISSING:
+            missing_post_ids.append(post_id)
+        elif post_details == "SKIP":
+            stale_post_ids.append(post_id)
+        elif post_details and post_details[0]:
             posts_to_retry.append((post_id, post_details[0]))
+
+    if stale_post_ids:
+        for post_id in stale_post_ids:
+            failed_cache.pop(post_id, None)
+        save_failed_posts_cache(failed_cache)
+        print(c_info(f"Cleared {len(stale_post_ids)} stale entries already downloaded"))
 
     # Batch fetch all tags
     if posts_to_retry:
@@ -1101,8 +1126,10 @@ def retry_failed_posts(session):
         else:
             still_failed += 1
 
-    # Handle posts that were skipped or couldn't be fetched
+    # Handle posts that couldn't be fetched (stale and missing entries are not failures).
     for post_id in failed_post_ids:
+        if post_id in stale_post_ids or post_id in missing_post_ids:
+            continue
         if not any(pid == post_id for pid, _ in posts_to_retry):
             still_failed += 1
 
@@ -1110,6 +1137,9 @@ def retry_failed_posts(session):
 
     if success_count > 0:
         print(c_success(f"\nRecovered {success_count} posts"))
+    if missing_post_ids:
+        print(c_warning(f"{len(missing_post_ids)} posts no longer exist on Gelbooru (deleted or hidden)"))
+        print(c_dim(f"  {', '.join(missing_post_ids)}"))
     if still_failed > 0:
         print(c_warning(f"{still_failed} posts still failing"))
 
