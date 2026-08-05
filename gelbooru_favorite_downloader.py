@@ -254,16 +254,24 @@ def countdown_sleep(seconds, reason="Waiting", show_done=True):
 
 # Login function
 def login():
+    LOGIN_SUCCESS_MARKER = ">Logout</a>"
     session = requests.Session()
     login_url = "https://gelbooru.com/index.php?page=account&s=login&code=00"
     login_data = {"user": USERNAME, "pass": PASSWORD, "submit": "Log in"}
 
     try:
-        response = session.post(login_url, data=login_data)
+        response = session.post(login_url, data=login_data, timeout=30)
         response.raise_for_status()
-    except Exception as e:
-        log_message(f"Error logging in: {str(e)}")
-        return None
+    except requests.exceptions.RequestException as e:
+        print(c_error(f"Could not reach Gelbooru to log in: {e}"))
+        sys.exit(1)
+
+    if LOGIN_SUCCESS_MARKER not in response.text:
+        log_message(f"Login response (first 200 chars): {response.text[:200]}")
+        print(c_error(
+            "Login failed: check GELBOORU_USERNAME / GELBOORU_PASSWORD in .env"
+        ))
+        sys.exit(1)
 
     return session
 
@@ -1109,7 +1117,7 @@ def signal_handler(sig, frame):
     os._exit(0)
 
 
-def retry_failed_posts(session):
+def retry_failed_posts():
     """Retry downloading posts that previously failed."""
     failed_cache = load_failed_posts_cache()
 
@@ -1271,15 +1279,13 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     print(c_dim("Press Ctrl+C to gracefully exit the program."))
 
-    session = login()
-    if session is None:
-        print(c_error("Failed to log in. Exiting."))
-        return
-
     # Handle --retry-failed mode
     if args.retry_failed:
-        retry_failed_posts(session)
+        retry_failed_posts()
+        print_rate_limit_summary()
         return
+
+    session = login()
 
     # Load posts cache
     posts_cache = load_posts_cache()
