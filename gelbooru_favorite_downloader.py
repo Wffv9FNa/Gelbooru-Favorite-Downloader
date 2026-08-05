@@ -687,7 +687,7 @@ def batch_fetch_tag_details(tags):
                     if tag_details:
                         with cache_update_lock:
                             pending_tag_cache[tag] = tag_details
-                except Exception as e:
+                except Exception:
                     pass  # Silently skip tag errors
 
                 # Update progress bar with colours
@@ -1286,9 +1286,6 @@ def main():
         return
 
     session = login()
-
-    # Load posts cache
-    posts_cache = load_posts_cache()
 
     pid = 0
     consecutive_empty_pages = (
