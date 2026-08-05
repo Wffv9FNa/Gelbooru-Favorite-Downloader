@@ -194,8 +194,22 @@ pending_posts_cache = {}
 pending_tag_cache = {}
 cache_update_lock = threading.Lock()
 
+rate_stats = {
+    "throttle_waits": 0,
+    "throttle_wait_seconds": 0.0,
+    "rate_limit_429s": 0,
+    "cooldown_seconds": 0.0,
+    "retries": 0,
+    "peak_delay_seconds": MIN_DELAY,
+    "min_workers": MAX_WORKERS,
+    "waits_by_endpoint": {"detail": 0, "tag": 0, "download": 0},
+    "wait_seconds_by_endpoint": {"detail": 0.0, "tag": 0.0, "download": 0.0},
+}
+stats_lock = threading.Lock()
+
 # Logging settings
 log_to_file = False  # Will be set to True if -logtofile flag is used
+debug_enabled = False  # Will be set to True if --debug flag is used
 
 
 # Logging functions
@@ -204,6 +218,19 @@ def log_message(message, log_file="log.txt"):
     if log_to_file:
         with open(log_file, "a") as file:
             file.write(message + "\n")
+
+
+def debug_log(message):
+    """Emit verbose rate-limit telemetry, prefixed with time and thread. Gated on --debug."""
+    if not debug_enabled:
+        return
+    now = time.time()
+    timestamp = time.strftime("%H:%M:%S", time.localtime(now)) + f".{int((now % 1) * 1000):03d}"
+    line = f"[DEBUG {timestamp} {threading.current_thread().name}] {message}"
+    print(c_dim(line), flush=True)
+    if log_to_file:
+        with open("debug_log.txt", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
 
 
 def countdown_sleep(seconds, reason="Waiting", show_done=True):
@@ -264,6 +291,7 @@ def get_post_details(post_id):
     if post_id in posts_cache:
         return "SKIP"
 
+    rate_limit_api_call("detail")
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
     base_delay = 5  # Increased base delay for rate limiting
@@ -305,6 +333,9 @@ def get_post_details(post_id):
 
             if i < max_retries - 1:
                 delay = base_delay * (2**i)  # Exponential backoff
+                with stats_lock:
+                    rate_stats["retries"] += 1
+                debug_log(f"[post {post_id}] retry {i + 1}/{max_retries} in {delay}s: {str(e)[:60]}")
                 log_message(
                     f"Post {post_id:<8}: {str(e)}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
                 )
@@ -551,7 +582,7 @@ def batch_fetch_tag_details(tags):
 
 def get_tag_details_single(tag):
     """Fetch single tag details without caching logic"""
-    rate_limit_api_call()
+    rate_limit_api_call("tag")
 
     modified_tag = (
         tag.replace("&#039;", "'")
@@ -591,8 +622,12 @@ def get_tag_details_single(tag):
 
             if i < max_retries - 1:
                 delay = base_delay * (2**i)
+                with stats_lock:
+                    rate_stats["retries"] += 1
+                debug_log(f"[tag {tag}] retry {i + 1}/{max_retries} in {delay}s: {str(e)[:60]}")
                 time.sleep(delay)
             else:
+                debug_log(f"[tag {tag}] gave up after {max_retries} attempts: {str(e)[:60]}")
                 return None
 
     return None
@@ -716,14 +751,21 @@ def add_rate_limited_post(post_id):
     with rate_limited_lock:
         rate_limited_posts.add(post_id)
         _save_rate_limited_posts_unlocked()
+        tracked = len(rate_limited_posts)
+    debug_log(f"now tracking rate-limited post {post_id} ({tracked} tracked)")
 
 
 def remove_rate_limited_post(post_id):
     """Remove a post from the rate-limited tracking set"""
+    removed = False
     with rate_limited_lock:
         if post_id in rate_limited_posts:
             rate_limited_posts.remove(post_id)
             _save_rate_limited_posts_unlocked()
+            removed = True
+        tracked = len(rate_limited_posts)
+    if removed:
+        debug_log(f"cleared rate-limited post {post_id} ({tracked} still tracked)")
 
 
 # Functions related to cache handling
@@ -800,7 +842,7 @@ def get_folder_name(character_tags, copyright_tag):
             return ("Multiple", None)
 
 
-def rate_limit_api_call():
+def rate_limit_api_call(endpoint="api"):
     """Ensure we don't make API calls too frequently"""
     global last_api_call_time, adaptive_delay
 
@@ -814,13 +856,23 @@ def rate_limit_api_call():
         else:
             sleep_time = earliest_allowed - current_time
             last_api_call_time = earliest_allowed
+        delay_snapshot = adaptive_delay
 
     # Sleep OUTSIDE the lock so other threads aren't blocked
     if sleep_time > 0:
+        with stats_lock:
+            rate_stats["throttle_waits"] += 1
+            rate_stats["throttle_wait_seconds"] += sleep_time
+            if endpoint in rate_stats["waits_by_endpoint"]:
+                rate_stats["waits_by_endpoint"][endpoint] += 1
+                rate_stats["wait_seconds_by_endpoint"][endpoint] += sleep_time
+        debug_log(f"throttle wait {sleep_time:.2f}s (adaptive_delay={delay_snapshot:.2f}s)")
         if sleep_time >= 2:
             countdown_sleep(sleep_time, "Rate limiting", show_done=False)
         else:
             time.sleep(sleep_time)
+    else:
+        debug_log(f"no throttle wait (adaptive_delay={delay_snapshot:.2f}s)")
 
 
 def handle_rate_limit_response():
@@ -843,6 +895,19 @@ def handle_rate_limit_response():
 
         # Force a longer pause after rate limit
         sleep_time = adaptive_delay * 2
+
+    with stats_lock:
+        rate_stats["rate_limit_429s"] += 1
+        rate_stats["cooldown_seconds"] += sleep_time
+        rate_stats["peak_delay_seconds"] = max(rate_stats["peak_delay_seconds"], new_delay)
+        rate_stats["min_workers"] = min(rate_stats["min_workers"], new_workers)
+        total_429s = rate_stats["rate_limit_429s"]
+
+    print(c_warning(f"\n! Rate limited - backing off ({new_delay:.1f}s delay)"), flush=True)
+    debug_log(
+        f"429 #{total_429s}: adaptive_delay {old_delay:.2f}s -> {new_delay:.2f}s, "
+        f"workers {old_workers} -> {new_workers}, cooldown {sleep_time:.2f}s"
+    )
 
     # Countdown outside the lock so other threads aren't blocked
     countdown_sleep(sleep_time, c_warning("Rate limit cooldown"))
@@ -873,6 +938,36 @@ def reset_adaptive_delay():
 
             successful_requests = 0  # Reset counter after adjustment
 
+    if decreased:
+        debug_log(
+            f"{SUCCESS_THRESHOLD} clean requests: adaptive_delay {old_delay:.2f}s -> {new_delay:.2f}s"
+        )
+    if ramped:
+        debug_log(
+            f"{SUCCESS_THRESHOLD} clean requests: workers {old_workers} -> {new_workers}"
+        )
+
+
+def print_rate_limit_summary():
+    """Print accumulated rate-limit telemetry; helps evaluate and tune config.yaml."""
+    with stats_lock:
+        s = dict(rate_stats)
+    print(c_header("\n" + "=" * 60))
+    print(c_header("  Rate-limit summary"))
+    print(c_header("=" * 60))
+    print(f"  429 responses hit:      {s['rate_limit_429s']}")
+    print(f"  Retry attempts:         {s['retries']}")
+    print(f"  Throttle spacing waits: {s['throttle_waits']} ({s['throttle_wait_seconds']:.1f}s total)")
+    for ep in ("detail", "tag", "download"):
+        print(
+            f"    - {ep:<8s} {s['waits_by_endpoint'][ep]} "
+            f"({s['wait_seconds_by_endpoint'][ep]:.1f}s)"
+        )
+    print(f"  429 cooldown time:      {s['cooldown_seconds']:.1f}s total")
+    print(f"  Peak adaptive delay:    {s['peak_delay_seconds']:.2f}s (config max {MAX_DELAY:.2f}s)")
+    print(f"  Min concurrent workers: {s['min_workers']} (config start {MAX_WORKERS})")
+    print(f"  Final adaptive delay:   {adaptive_delay:.2f}s")
+
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully by saving caches before exiting"""
@@ -886,6 +981,11 @@ def signal_handler(sig, frame):
         print(c_success("Progress saved."))
     except Exception as e:
         print(c_error(f"Warning: Error saving caches: {str(e)}"))
+
+    try:
+        print_rate_limit_summary()
+    except Exception:
+        pass
 
     print(c_info("Goodbye!"))
     sys.stdout.flush()
@@ -910,7 +1010,7 @@ def retry_failed_posts(session):
     print(c_info("Fetching post details..."))
     posts_to_retry = []
     for post_id in failed_post_ids:
-        rate_limit_api_call()
+        rate_limit_api_call("detail")
         post_details = get_post_details(post_id)
         if post_details and post_details != "SKIP" and post_details[0]:
             posts_to_retry.append((post_id, post_details[0]))
@@ -987,10 +1087,16 @@ def main():
         help="list all failed posts without retrying",
         action="store_true"
     )
+    parser.add_argument(
+        "--debug",
+        help="emit verbose rate-limit telemetry (per-event timing, backoff, retries)",
+        action="store_true"
+    )
     args = parser.parse_args()
 
-    global log_to_file, rate_limited_posts
+    global log_to_file, rate_limited_posts, debug_enabled
     log_to_file = args.logtofile
+    debug_enabled = args.debug
 
     # Handle --list-failed
     if args.list_failed:
@@ -1094,6 +1200,8 @@ def main():
     remaining_rate_limited = len(rate_limited_posts)
     if remaining_rate_limited > 0:
         print(c_warning(f"\n{remaining_rate_limited} posts still rate-limited (will retry next run)"))
+
+    print_rate_limit_summary()
 
     print(c_success("\n" + "="*60))
     print(c_success("  Complete! All progress saved."))
