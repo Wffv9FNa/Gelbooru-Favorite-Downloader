@@ -485,7 +485,7 @@ def download_image(url, file_path):
                 # Silent sleep, not countdown_sleep: this runs on a worker thread under the progress bar.
                 time.sleep(delay)
                 continue
-            raise Exception(f"Error downloading image: {e!s}")
+            raise Exception(f"Error downloading image: {e!s}") from e
 
         with open(file_path, "wb") as f:
             f.write(response.content)
