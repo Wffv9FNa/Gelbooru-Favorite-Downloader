@@ -327,13 +327,13 @@ def get_favorite_post_ids(session, pid):
                     rate_stats["retries"] += 1
                 debug_log(f"[favourites pid={pid}] retry {i + 1}/{max_retries} in {delay}s: {str(e)[:60]}")
                 log_message(
-                    f"Favourite page pid={pid}: {str(e)}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
+                    f"Favourite page pid={pid}: {e!s}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
                 )
                 countdown_sleep(delay, f"Retry backoff for favourite page pid={pid}")
             else:
                 debug_log(f"[favourites pid={pid}] gave up after {max_retries} attempts: {str(e)[:60]}")
                 log_message(
-                    f"Failed to get favourite page pid={pid} after {max_retries} attempts: {str(e)}"
+                    f"Failed to get favourite page pid={pid} after {max_retries} attempts: {e!s}"
                 )
                 return FETCH_FAILED
 
@@ -402,12 +402,12 @@ def get_post_details(post_id):
                     rate_stats["retries"] += 1
                 debug_log(f"[post {post_id}] retry {i + 1}/{max_retries} in {delay}s: {str(e)[:60]}")
                 log_message(
-                    f"Post {post_id:<8}: {str(e)}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
+                    f"Post {post_id:<8}: {e!s}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
                 )
                 countdown_sleep(delay, f"Retry backoff for post {post_id}")
             else:
                 log_message(
-                    f"Failed to get post {post_id:<8} after {max_retries} attempts: {str(e)}"
+                    f"Failed to get post {post_id:<8} after {max_retries} attempts: {e!s}"
                 )
                 # Save the post ID to the cache when it exceeds max retries
                 with failed_cache_lock:
@@ -485,7 +485,7 @@ def download_image(url, file_path):
                 # Silent sleep, not countdown_sleep: this runs on a worker thread under the progress bar.
                 time.sleep(delay)
                 continue
-            raise Exception(f"Error downloading image: {str(e)}")
+            raise Exception(f"Error downloading image: {e!s}")
 
         with open(file_path, "wb") as f:
             f.write(response.content)
@@ -540,7 +540,7 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
         return True  # Indicate successful download
     except Exception as e:
         log_message(
-            f"Error downloading image {file_name} for post {post['id']:<8}: {str(e)}"
+            f"Error downloading image {file_name} for post {post['id']:<8}: {e!s}"
         )
         return False  # Indicate failed download
 
@@ -650,7 +650,7 @@ def batch_process_posts(post_ids):
                     downloaded_count += 1
             except Exception as e:
                 failed_count += 1
-                log_message(f"Error processing post: {str(e)}")
+                log_message(f"Error processing post: {e!s}")
 
     # Flush cache updates
     flush_cache_buffers()
@@ -1097,7 +1097,7 @@ def signal_handler(sig, frame):
         flush_cache_buffers()
         print(c_success("Progress saved."))
     except Exception as e:
-        print(c_error(f"Warning: Error saving caches: {str(e)}"))
+        print(c_error(f"Warning: Error saving caches: {e!s}"))
 
     try:
         print_rate_limit_summary()
