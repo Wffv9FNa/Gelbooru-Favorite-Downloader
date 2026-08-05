@@ -13,16 +13,18 @@ A Python script to download your Gelbooru favorite images and organize them into
 - **Failed post tracking** with retry capability
 - **Configuration file** for easy customization
 - **Graceful shutdown** (Ctrl+C) with progress saving
-- Optional file logging
+- **Rate-limit summary** printed at the end of every run (and on Ctrl+C) to help tune `config.yaml`, including a per-endpoint breakdown of throttle-gate waits (post-detail / tag / download)
+- Optional file logging, plus a verbose `--debug` mode for rate-limit telemetry
 
 ## Requirements
 
-- Python 3.6 or later
+- Python 3.9 or later (the code uses built-in generic type hints such as `tuple[str, str]`)
 - Required packages:
   - beautifulsoup4
   - requests
   - pyyaml
   - colorama
+  - python-dotenv
 
 ## Installation
 
@@ -39,42 +41,54 @@ pip install -r requirements.txt
 
 Or manually:
 ```bash
-pip install beautifulsoup4 requests pyyaml colorama
+pip install beautifulsoup4 requests pyyaml colorama python-dotenv
 ```
 
-3. Configure your credentials:
+3. Configure your credentials and settings:
 ```bash
+cp .env.example .env
 cp config.yaml.example config.yaml
 ```
 
-4. Edit `config.yaml` and add your Gelbooru credentials:
-   - **API Key** and **User ID**: Get these from Gelbooru → My Account → Options → API Access Credentials
-   - **Username** and **Password**: Your Gelbooru login credentials
+4. Edit `.env` and add your Gelbooru credentials:
+   - **GELBOORU_API_KEY** and **GELBOORU_USER_ID**: Get these from Gelbooru → My Account → Options → API Access Credentials
+   - **GELBOORU_USERNAME** and **GELBOORU_PASSWORD**: Your Gelbooru login credentials
+
+   Tuning options (download folders, threading, rate limiting) live in `config.yaml`.
 
 ## Configuration
 
-The `config.yaml` file contains all settings:
+Credentials live in `.env`; all tuning options live in `config.yaml`.
 
 ### API Credentials
-```yaml
-api:
-  api_key: "your-api-key-here"
-  user_id: "your-user-id-here"
-  username: "your-username-here"
-  password: "your-password-here"
+
+Credentials are read from a `.env` file (never committed). Copy `.env.example` to `.env` and fill in:
+```
+GELBOORU_API_KEY=your-api-key-here
+GELBOORU_USER_ID=your-user-id-here
+GELBOORU_USERNAME=your-username-here
+GELBOORU_PASSWORD=your-password-here
 ```
 
-### General Settings
+`config.yaml` must contain four sections - `settings`, `cache`, `threading`, and `rate_limiting`. The script exits with an error if any section is missing.
+
+### General Settings (`settings`)
 - `posts_per_page`: Number of posts to fetch per page (default: 50)
 - `max_consecutive_empty_pages`: Stop after this many pages with no new downloads (default: 10)
 - `base_dir`: Base directory for downloads (leave empty to use script directory)
 
-### Threading & Performance
+### Cache Files (`cache`)
+- `tag_cache_file`: Tag detail cache (default: `tag_cache.json`)
+- `posts_cache_file`: Successfully processed posts (default: `posts_cache.json`)
+- `failed_posts_cache_file`: Failed posts for `--retry-failed` (default: `failed_posts_cache.json`)
+- `rate_limited_posts_file`: Currently rate-limited posts (default: `rate_limited_posts.json`)
+
+### Threading & Performance (`threading`)
 - `max_workers`: Parallel API request threads (default: 4)
 - `download_workers`: Parallel download threads (default: 3)
 - `tag_batch_size`: Tags to process per batch (default: 20)
 
-### Rate Limiting
+### Rate Limiting (`rate_limiting`)
 - `min_delay`: Minimum delay between API calls in seconds (default: 0.25)
 - `max_delay`: Maximum delay between API calls in seconds (default: 5.0)
 - `delay_increase_factor`: Multiply delay by this when rate limited (default: 1.5)
@@ -98,15 +112,21 @@ python gelbooru_favorite_downloader.py -logtofile
 ```
 
 ### Retry Failed Downloads
-Retry posts that previously failed:
+Retry posts that previously failed (`-r` is a short alias):
 ```bash
 python gelbooru_favorite_downloader.py --retry-failed
 ```
 
 ### List Failed Posts
-Display all failed posts without retrying:
+Display all failed posts (and any currently rate-limited posts) without retrying:
 ```bash
 python gelbooru_favorite_downloader.py --list-failed
+```
+
+### Debug Mode
+Emit verbose rate-limit telemetry (per-event timing, backoff, retries). Combine with `-logtofile` to also write a `debug_log.txt`:
+```bash
+python gelbooru_favorite_downloader.py --debug
 ```
 
 ## How It Works
@@ -119,7 +139,8 @@ python gelbooru_favorite_downloader.py --list-failed
    - Download images in parallel
 4. **Organize files** into folders:
    - Single character: `{character_name}/{sensitivity}/`
-   - Multiple characters: `Multiple/{copyright}/{sensitivity}/`
+   - Multiple characters with a copyright tag: `Multiple/{copyright}/{sensitivity}/`
+   - Multiple characters with no copyright tag: `Multiple/{sensitivity}/`
    - No character tags: `No Character/{sensitivity}/`
 5. **Cache everything** to avoid reprocessing on future runs
 
@@ -169,7 +190,10 @@ If you see "Rate limited" messages, the script will automatically:
 Use `--list-failed` to see what failed, then `--retry-failed` to attempt recovery.
 
 ### Configuration Errors
-Make sure `config.yaml` exists and has valid credentials. See `config.yaml.example` for the template.
+Make sure `.env` exists with valid credentials (copy `.env.example` to `.env`), and that `config.yaml` exists with your tuning settings (copy `config.yaml.example` to `config.yaml`).
+
+### Folder Names With HTML Entities
+Folders created before the entity-decoding fix may contain literal HTML entities in their names (e.g. `agent_(girls&#039;_frontline)/`), whereas folders created afterwards use the decoded form (e.g. `agent_(girls'_frontline)/`). The two are **not** merged or renamed automatically: already-downloaded posts are deduplicated by post id in `posts_cache`, so no images are re-downloaded - affected characters simply have a one-time split between the old and new folder. If you want a single folder, move the old contents across manually. Tag names are assumed to be single-encoded; a rare double-encoded name would need more than one decode pass and is intentionally not handled.
 
 ## Contributing
 
