@@ -268,20 +268,67 @@ def login():
 
 
 # Functions related to fetching post data
+
+# Distinct from an empty list (end of favourites) so a failed fetch is not treated as the end.
+FETCH_FAILED = object()
+
+# Distinct from a fetch failure so a deleted post is not reported as an error.
+POST_MISSING = object()
+
+
 def get_favorite_post_ids(session, pid):
+    """Scrape one page of favourite post ids starting at offset pid.
+
+    Returns a list of post id strings (empty when the page is past the last
+    favourite), or the FETCH_FAILED sentinel if the page could not be retrieved
+    after all retries. The empty-list and FETCH_FAILED cases are kept distinct so
+    a transient failure is not mistaken for the end of the favourites.
+    """
     url = f"https://gelbooru.com/index.php?page=favorites&s=view&id={USER_ID}&pid={pid}"
-    try:
-        response = session.get(url)
-        response.raise_for_status()
-    except Exception as e:
-        log_message(f"Error getting favorite posts: {str(e)}")
-        return None
+    max_retries = 5
+    base_delay = 5
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    post_spans = soup.find_all("span", class_="thumb")
-    post_ids = [span.find("a")["href"].split("=")[-1] for span in post_spans]
+    for i in range(max_retries):
+        try:
+            response = session.get(url, timeout=30)
+            if response.status_code == 429:
+                handle_rate_limit_response()
+                raise requests.exceptions.RequestException("Too Many Requests")
 
-    return post_ids
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            post_spans = soup.find_all("span", class_="thumb")
+            post_ids = [span.find("a")["href"].split("=")[-1] for span in post_spans]
+            reset_adaptive_delay()
+            debug_log(f"[favourites pid={pid}] fetched {len(post_ids)} post ids on attempt {i + 1}")
+            if i > 0:
+                log_message(
+                    f"Successfully retrieved favourite page pid={pid} after {i + 1} attempts"
+                )
+            return post_ids
+
+        except requests.exceptions.RequestException as e:
+            if "Too Many Requests" in str(e):
+                handle_rate_limit_response()
+
+            if i < max_retries - 1:
+                delay = base_delay * (2**i)
+                with stats_lock:
+                    rate_stats["retries"] += 1
+                debug_log(f"[favourites pid={pid}] retry {i + 1}/{max_retries} in {delay}s: {str(e)[:60]}")
+                log_message(
+                    f"Favourite page pid={pid}: {str(e)}. Retrying after {delay}s (attempt {i + 1}/{max_retries})"
+                )
+                countdown_sleep(delay, f"Retry backoff for favourite page pid={pid}")
+            else:
+                debug_log(f"[favourites pid={pid}] gave up after {max_retries} attempts: {str(e)[:60]}")
+                log_message(
+                    f"Failed to get favourite page pid={pid} after {max_retries} attempts: {str(e)}"
+                )
+                return FETCH_FAILED
+
+    return FETCH_FAILED
 
 
 def get_post_details(post_id):
@@ -1158,7 +1205,10 @@ def main():
 
     while consecutive_empty_pages < MAX_CONSECUTIVE_EMPTY_PAGES:
         post_ids = get_favorite_post_ids(session, pid)
-        if post_ids is None or not post_ids:
+        if post_ids is FETCH_FAILED:
+            print(c_error(f"Could not fetch favourite page (pid={pid}) after retries; stopping to avoid missing posts."))
+            break
+        if not post_ids:
             print(c_info("No more favourite posts found."))
             break
 
