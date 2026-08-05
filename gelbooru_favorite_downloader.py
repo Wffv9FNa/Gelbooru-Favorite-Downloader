@@ -337,6 +337,7 @@ def get_favorite_post_ids(session, pid):
                 )
                 return FETCH_FAILED
 
+    # Defensive: only reachable if max_retries ever becomes 0 or negative.
     return FETCH_FAILED
 
 
@@ -757,6 +758,7 @@ def get_tag_details_single(tag):
                 debug_log(f"[tag {tag}] gave up after {max_retries} attempts: {str(e)[:60]}")
                 return None
 
+    # Defensive: only reachable if max_retries ever becomes 0 or negative.
     return None
 
 
