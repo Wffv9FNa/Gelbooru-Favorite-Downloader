@@ -1,3 +1,20 @@
+"""Download a Gelbooru user's favourites to local folders organised by character,
+copyright and content rating.
+
+Reads tuning settings from config.yaml and credentials (API key, user id, username,
+password) from a .env file alongside this script. Pages through the favourites list,
+fetches post and tag details via the Gelbooru API, and downloads images in parallel
+with adaptive rate limiting. Progress is cached so reruns skip already-downloaded posts.
+
+Run with: python gelbooru_favorite_downloader.py
+
+Flags:
+  -logtofile        also append console output to log.txt (and debug_log.txt with --debug)
+  -r/--retry-failed retry posts recorded in the failed-posts cache instead of paging favourites
+  --list-failed     print failed and rate-limited posts, then exit without downloading
+  --debug           emit verbose rate-limit telemetry
+"""
+
 import argparse
 import json
 import os
@@ -152,6 +169,7 @@ DOWNLOAD_WORKERS = config["threading"].get("download_workers", 3)
 TAG_BATCH_SIZE = config["threading"].get("tag_batch_size", 20)
 
 file_lock = threading.Lock()
+failed_cache_lock = threading.Lock()
 
 # Rate Limiting Settings
 MIN_DELAY = config["rate_limiting"].get("min_delay", 0.25)
@@ -243,14 +261,12 @@ def get_post_details(post_id):
     # Load posts cache
     posts_cache = load_posts_cache()
 
-    # Check if the post is in the cache
     if post_id in posts_cache:
         return "SKIP"
 
     url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&id={post_id}&json=1&api_key={API_KEY}&user_id={USER_ID}"
     max_retries = 5
     base_delay = 5  # Increased base delay for rate limiting
-    failed_posts_cache = load_failed_posts_cache()
 
     for i in range(max_retries):
         try:
@@ -298,8 +314,10 @@ def get_post_details(post_id):
                     f"Failed to get post {post_id:<8} after {max_retries} attempts: {str(e)}"
                 )
                 # Save the post ID to the cache when it exceeds max retries
-                failed_posts_cache[str(post_id)] = {"error": str(e)[:100], "type": "api"}
-                save_failed_posts_cache(failed_posts_cache)
+                with failed_cache_lock:
+                    failed_posts_cache = load_failed_posts_cache()
+                    failed_posts_cache[str(post_id)] = {"error": str(e)[:100], "type": "api"}
+                    save_failed_posts_cache(failed_posts_cache)
                 remove_rate_limited_post(
                     post_id
                 )  # Remove from tracking after max retries
@@ -397,14 +415,14 @@ def flush_cache_buffers():
 def batch_process_posts(post_ids, session):
     """Process multiple posts in parallel"""
     downloaded_count = 0
-    retry_count = 0
-    rate_limited_count = 0
     failed_count = 0
 
     # First, fetch all post details in parallel with dynamic worker count
     total_posts = len(post_ids)
     print(c_info("Fetching post details..."))
-    with ThreadPoolExecutor(max_workers=current_max_workers) as executor:
+    with workers_lock:
+        worker_count = current_max_workers
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         # Submit all post detail fetching tasks with staggered delays
         future_to_post_id = {}
         for i, post_id in enumerate(post_ids):
@@ -429,9 +447,7 @@ def batch_process_posts(post_ids, session):
                 else:
                     failed_count += 1
             except Exception as e:
-                if "Too Many Requests" in str(e):
-                    rate_limited_count += 1
-                else:
+                if "Too Many Requests" not in str(e):
                     failed_count += 1
 
             # Update progress bar with colours
@@ -464,7 +480,9 @@ def batch_process_posts(post_ids, session):
     batch_fetch_tag_details(list(all_tags))
 
     # Process posts with image downloads in parallel
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as executor:
+    with workers_lock:
+        worker_count = current_max_workers
+    with ThreadPoolExecutor(max_workers=min(worker_count, DOWNLOAD_WORKERS)) as executor:
         futures = [
             executor.submit(process_post, post) for post in posts_to_process
         ]
@@ -494,14 +512,15 @@ def batch_fetch_tag_details(tags):
 
     # Process tags in batches to avoid overwhelming the API
     total_tags = len(tags_to_fetch)
-    total_batches = (total_tags + TAG_BATCH_SIZE - 1) // TAG_BATCH_SIZE
     print(c_info(f"Fetching {total_tags} new tag details..."))
     tags_completed = 0
 
     for i in range(0, total_tags, TAG_BATCH_SIZE):
         batch = tags_to_fetch[i : i + TAG_BATCH_SIZE]
 
-        with ThreadPoolExecutor(max_workers=min(len(batch), MAX_WORKERS)) as executor:
+        with workers_lock:
+            worker_count = current_max_workers
+        with ThreadPoolExecutor(max_workers=min(len(batch), worker_count)) as executor:
             future_to_tag = {
                 executor.submit(get_tag_details_single, tag): tag for tag in batch
             }
@@ -550,11 +569,13 @@ def get_tag_details_single(tag):
     for i in range(max_retries):
         try:
             response = requests.get(url, timeout=10)
-            response.raise_for_status()
 
+            # Check 429 before raise_for_status so it routes to backoff, not a generic HTTPError.
             if response.status_code == 429:
                 handle_rate_limit_response()
-                raise requests.exceptions.RequestException("Too Many Requests")
+                raise requests.exceptions.RequestException("HTTP 429 rate limited")
+
+            response.raise_for_status()
 
             data = json.loads(response.text)
             if data and "tag" in data and data["tag"]:
@@ -627,9 +648,10 @@ def process_post(post):
         except Exception as e:
             print(f"  {c_error('x')} {c_error('Failed:')} {file_name[:30]} - {str(e)[:30]}")
             # Track download failures so they can be retried later
-            failed_cache = load_failed_posts_cache()
-            failed_cache[str(post_id)] = {"error": str(e)[:100], "type": "download"}
-            save_failed_posts_cache(failed_cache)
+            with failed_cache_lock:
+                failed_cache = load_failed_posts_cache()
+                failed_cache[str(post_id)] = {"error": str(e)[:100], "type": "download"}
+                save_failed_posts_cache(failed_cache)
     else:
         # File already exists, safe to cache
         with cache_update_lock:
@@ -687,12 +709,6 @@ def _save_rate_limited_posts_unlocked():
     """Save rate-limited posts to disk. Must be called while holding rate_limited_lock."""
     with open(RATE_LIMITED_POSTS_FILE, "w") as f:
         json.dump(list(rate_limited_posts), f)
-
-
-def save_rate_limited_posts():
-    """Save the current set of rate-limited posts to disk"""
-    with rate_limited_lock:
-        _save_rate_limited_posts_unlocked()
 
 
 def add_rate_limited_post(post_id):
@@ -790,23 +806,18 @@ def rate_limit_api_call():
 
     with api_call_lock:
         current_time = time.time()
-        # Calculate the earliest time we're allowed to make a call
         earliest_allowed = last_api_call_time + adaptive_delay
 
         if current_time >= earliest_allowed:
-            # We can call immediately, no waiting needed
             sleep_time = 0
             last_api_call_time = current_time
         else:
-            # We need to wait until our reserved slot
             sleep_time = earliest_allowed - current_time
-            # Reserve this slot for ourselves
             last_api_call_time = earliest_allowed
 
     # Sleep OUTSIDE the lock so other threads aren't blocked
     if sleep_time > 0:
         if sleep_time >= 2:
-            # Only show countdown for longer waits (2+ seconds)
             countdown_sleep(sleep_time, "Rate limiting", show_done=False)
         else:
             time.sleep(sleep_time)
@@ -827,8 +838,8 @@ def handle_rate_limit_response():
             current_max_workers = max(
                 1, current_max_workers - 1
             )  # Reduce workers but keep at least 1
-
-        print(c_warning(f"\n! Rate limited - backing off ({adaptive_delay:.1f}s delay)"), flush=True)
+        new_workers = current_max_workers
+        new_delay = adaptive_delay
 
         # Force a longer pause after rate limit
         sleep_time = adaptive_delay * 2
@@ -839,12 +850,27 @@ def handle_rate_limit_response():
 
 def reset_adaptive_delay():
     """Reset adaptive delay to normal when requests are successful"""
-    global adaptive_delay, successful_requests
+    global adaptive_delay, successful_requests, current_max_workers
+    decreased = False
+    ramped = False
     with api_call_lock:
         successful_requests += 1
 
-        if successful_requests >= SUCCESS_THRESHOLD and adaptive_delay > MIN_DELAY:
-            adaptive_delay = max(adaptive_delay * DELAY_DECREASE_FACTOR, MIN_DELAY)
+        if successful_requests >= SUCCESS_THRESHOLD:
+            if adaptive_delay > MIN_DELAY:
+                old_delay = adaptive_delay
+                adaptive_delay = max(adaptive_delay * DELAY_DECREASE_FACTOR, MIN_DELAY)
+                new_delay = adaptive_delay
+                decreased = True
+
+            # ramp independently of the delay, else a 429 burst pins workers for the session
+            with workers_lock:
+                if current_max_workers < MAX_WORKERS:
+                    old_workers = current_max_workers
+                    current_max_workers += 1
+                    new_workers = current_max_workers
+                    ramped = True
+
             successful_requests = 0  # Reset counter after adjustment
 
 
