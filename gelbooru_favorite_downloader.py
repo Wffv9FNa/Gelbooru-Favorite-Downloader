@@ -16,6 +16,7 @@ Flags:
 """
 
 import argparse
+import html
 import json
 import os
 import signal
@@ -484,9 +485,9 @@ def download_image(url, file_path):
 
 
 def sanitize_for_path(name):
-    """
-    Sanitizes a string so it can be used as a valid file name or directory name in Windows.
-    Replaces invalid characters with an underscore.
+    """Sanitise a string for use as a Windows file or directory name.
+
+    Replaces each character that is invalid on Windows (<>:"/\\|?*) with an underscore.
     """
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
@@ -505,6 +506,7 @@ def download_and_save_image(post, character_tags, sensitivity, copyright_tag):
     )  # Sanitize the base folder name
 
     if specific_folder_name:
+        specific_folder_name = sanitize_for_path(specific_folder_name)
         path = os.path.join(
             BASE_DIR, base_folder_name, specific_folder_name, sensitivity
         )
@@ -724,7 +726,9 @@ def get_tag_details_single(tag):
             data = json.loads(response.text)
             if data and "tag" in data and data["tag"]:
                 reset_adaptive_delay()
-                return data["tag"][0]
+                tag_data = data["tag"][0]
+                tag_data["name"] = html.unescape(tag_data["name"])
+                return tag_data
             else:
                 reset_adaptive_delay()
                 return None
@@ -770,6 +774,7 @@ def process_post(post):
     base_folder_name = sanitize_for_path(base_folder_name)
 
     if specific_folder_name:
+        specific_folder_name = sanitize_for_path(specific_folder_name)
         path = os.path.join(
             BASE_DIR, base_folder_name, specific_folder_name, sensitivity
         )
@@ -819,7 +824,7 @@ def get_character_tags(tags):
                 tag_details = pending_tag_cache.get(tag)
 
         if tag_details and "type" in tag_details and int(tag_details["type"]) == 4:
-            character_tags.append(tag_details["name"])
+            character_tags.append(html.unescape(tag_details["name"]))
 
     return character_tags
 
@@ -836,7 +841,7 @@ def get_copyright_tag(tags):
                 tag_details = pending_tag_cache.get(tag)
 
         if tag_details and "type" in tag_details and int(tag_details["type"]) == 3:
-            return tag_details["name"]
+            return html.unescape(tag_details["name"])
 
     return None
 
