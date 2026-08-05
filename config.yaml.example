@@ -1,20 +1,6 @@
 # Gelbooru Favourite Downloader Configuration
-# Copy this file to config.yaml and fill in your credentials
-#
-# To obtain your API credentials:
-# 1. Log in to Gelbooru
-# 2. Go to My Account -> Options -> API Access Credentials
-# 3. Copy your API Key and User ID
-
-# =============================================================================
-# API Credentials
-# =============================================================================
-# Your Gelbooru API credentials - required for accessing the API
-api:
-  api_key: "your-api-key-here"
-  user_id: "your-user-id-here"
-  username: "your-username-here"
-  password: "your-password-here"
+# Copy this file to config.yaml and adjust the tuning settings below.
+# Credentials do NOT go here - copy .env.example to .env and fill them in there.
 
 # =============================================================================
 # General Settings

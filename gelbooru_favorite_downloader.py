@@ -12,6 +12,7 @@ import requests
 import yaml
 from bs4 import BeautifulSoup
 from colorama import init, Fore, Style
+from dotenv import load_dotenv
 
 # Initialise colorama for Windows compatibility
 init(autoreset=True)
@@ -54,14 +55,26 @@ def c_dim(text):
 # =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.yaml")
+DOTENV_FILE = os.path.join(SCRIPT_DIR, ".env")
+
+# override=False (default) so a real exported env var wins over the .env file.
+load_dotenv(DOTENV_FILE)
+
+# Placeholder values shipped in .env.example; treated as "not set".
+CREDENTIAL_ENV_VARS = {
+    "GELBOORU_API_KEY": "your-api-key-here",
+    "GELBOORU_USER_ID": "your-user-id-here",
+    "GELBOORU_USERNAME": "your-username-here",
+    "GELBOORU_PASSWORD": "your-password-here",
+}
 
 
 def load_config():
     """Load configuration from config.yaml file."""
     if not os.path.exists(CONFIG_FILE):
         print(f"Error: Configuration file not found: {CONFIG_FILE}")
-        print("Please create a config.yaml file with your settings.")
-        print("See config.yaml.example for reference.")
+        print("Please create a config.yaml file with your tuning settings.")
+        print("See config.yaml.example for reference. (Credentials go in .env - see .env.example.)")
         sys.exit(1)
 
     try:
@@ -74,11 +87,12 @@ def load_config():
     # Check for empty config file
     if config is None:
         print("Error: Configuration file is empty.")
-        print("Please copy config.yaml.example to config.yaml and fill in your settings.")
+        print("Please copy config.yaml.example to config.yaml and fill in your tuning settings.")
+        print("(Credentials go in .env - see .env.example.)")
         sys.exit(1)
 
     # Validate required sections
-    required_sections = ["api", "settings", "cache", "threading", "rate_limiting"]
+    required_sections = ["settings", "cache", "threading", "rate_limiting"]
     for section in required_sections:
         if section not in config:
             print(f"Error: Missing required section '{section}' in config.yaml")
@@ -87,39 +101,34 @@ def load_config():
     return config
 
 
-def validate_config(config):
-    """Validate configuration values and return processed config."""
-    errors = []
+def load_credentials():
+    """Load and validate the four Gelbooru credentials from the environment."""
+    missing = []
+    values = {}
+    for name, placeholder in CREDENTIAL_ENV_VARS.items():
+        value = (os.getenv(name) or "").strip()
+        if not value or value == placeholder:
+            missing.append(name)
+        values[name] = value
 
-    # Validate API credentials
-    api = config.get("api", {})
-    if not api.get("api_key") or api.get("api_key") == "your-api-key-here":
-        errors.append("API key not configured in config.yaml")
-    if not api.get("user_id") or api.get("user_id") == "your-user-id-here":
-        errors.append("User ID not configured in config.yaml")
-    if not api.get("username") or api.get("username") == "your-username-here":
-        errors.append("Username not configured in config.yaml")
-    if not api.get("password") or api.get("password") == "your-password-here":
-        errors.append("Password not configured in config.yaml")
-
-    if errors:
-        print("Configuration errors:")
-        for error in errors:
-            print(f"  - {error}")
+    if missing:
+        print(f"Error: Missing Gelbooru credentials in {DOTENV_FILE}")
+        print("Copy .env.example to .env and fill in the following:")
+        for name in missing:
+            print(f"  - {name} is not set in .env")
         sys.exit(1)
 
-    return config
+    return (
+        values["GELBOORU_API_KEY"],
+        values["GELBOORU_USER_ID"],
+        values["GELBOORU_USERNAME"],
+        values["GELBOORU_PASSWORD"],
+    )
 
 
 # Load configuration
 config = load_config()
-config = validate_config(config)
-
-# API Credentials
-API_KEY = config["api"]["api_key"]
-USER_ID = config["api"]["user_id"]
-USERNAME = config["api"]["username"]
-PASSWORD = config["api"]["password"]
+API_KEY, USER_ID, USERNAME, PASSWORD = load_credentials()
 
 # General Settings
 POSTS_PER_PAGE = config["settings"].get("posts_per_page", 50)
