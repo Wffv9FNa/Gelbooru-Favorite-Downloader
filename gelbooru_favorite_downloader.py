@@ -561,7 +561,7 @@ def flush_cache_buffers():
             pending_tag_cache.clear()
 
 
-def batch_process_posts(post_ids, session):
+def batch_process_posts(post_ids):
     """Process multiple posts in parallel"""
     downloaded_count = 0
     failed_count = 0
@@ -1308,7 +1308,7 @@ def main():
 
         # Process posts in batches
         start_time = time.time()
-        downloaded_count = batch_process_posts(post_ids, session)
+        downloaded_count = batch_process_posts(post_ids)
         end_time = time.time()
 
         elapsed = end_time - start_time
